@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import os from 'node:os';
+import path from 'node:path';
 import { createRequire } from 'node:module';
 import { paths, ensureConfigDir } from '../config/paths.mjs';
 import { ConfigManager } from '../config/manager.mjs';
@@ -35,6 +36,23 @@ function npmVersion() {
   }
 }
 
+function commandPath(name) {
+  const extensions = process.platform === 'win32' ? ['.cmd', '.exe', '.bat', ''] : [''];
+  for (const directory of String(process.env.PATH ?? '').split(path.delimiter)) {
+    if (!directory) continue;
+    for (const extension of extensions) {
+      const candidate = path.join(directory, `${name}${extension}`);
+      try {
+        fs.accessSync(candidate, process.platform === 'win32' ? fs.constants.F_OK : fs.constants.X_OK);
+        return candidate;
+      } catch {
+        // Keep looking.
+      }
+    }
+  }
+  return null;
+}
+
 function dirPermissions(dir) {
   try {
     const stat = fs.statSync(dir);
@@ -54,6 +72,13 @@ export async function runDoctor({ cwd = process.cwd() } = {}) {
 
   const npm = npmVersion();
   add('npm', npm ? 'ok' : 'warn', npm ? `v${npm}` : 'npm not found on PATH');
+
+  const cli = commandPath('mikuhost');
+  add(
+    'CLI on PATH',
+    cli ? 'ok' : 'warn',
+    cli ?? 'not found — use `npx mikuhost`, or add the npm global bin directory to PATH',
+  );
 
   const sqlite = hasNodeSqlite();
   add('SQLite (node:sqlite)', sqlite ? 'ok' : 'warn', sqlite ? 'built-in SQLite available' : 'unavailable — sessions will use the JSON fallback');

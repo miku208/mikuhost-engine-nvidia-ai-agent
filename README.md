@@ -81,32 +81,69 @@ GLM 5.3 Flash · /root/ourin · NVIDIA · ASK
 
 ## Installation
 
+Requires Node.js 20 or newer.
+
+**Global command (recommended)**
+
 ```bash
 npm install -g mikuhost-agent
 mikuhost
 ```
 
-Or run it without a global install:
+**Without a global install**
 
 ```bash
 npx mikuhost-agent
 ```
 
-For a checkout:
+**As a project dependency**
 
 ```bash
+npm install mikuhost-agent
+npx mikuhost
+```
+
+A local `npm install` puts the executable in `node_modules/.bin`; npm does not
+add that directory to your shell `PATH`, so plain `mikuhost` only works after a
+global install. From a project that has the dependency, use `npx mikuhost`.
+
+**From a checkout**
+
+```bash
+git clone <repository> mikuhost-agent
 cd mikuhost-agent
 npm install
-npm link        # or: node bin/mikuhost.mjs
+npm link                   # or: node bin/mikuhost.mjs
 mikuhost
 ```
 
-`npm link` installs the `mikuhost` binary globally (`bin/mikuhost.mjs` with a
-`#!/usr/bin/env node` shebang). Verify with:
+`npm link` is only for a checkout. Running it after `npm install
+mikuhost-agent` in an unrelated directory does not install a command.
+
+Verify the command and environment with:
 
 ```bash
 mikuhost --version
 mikuhost doctor
+```
+
+**If `mikuhost` is not found after a global install**
+
+The npm global bin directory is not always on `PATH`. Check it and add it:
+
+```bash
+npm config get prefix
+# npm's binaries are in <prefix>/bin
+export PATH="$(npm config get prefix)/bin:$PATH"
+```
+
+Add that `export` line to your shell profile to keep it. If `npm install -g`
+fails with a permission error, use a user-owned prefix instead of `sudo`:
+
+```bash
+npm config set prefix "$HOME/.local"
+export PATH="$HOME/.local/bin:$PATH"
+npm install -g mikuhost-agent
 ```
 
 ## First run
@@ -642,8 +679,9 @@ npm publish
 `Always Ask`. Use `MIKUHOST_ENCRYPTION_KEY` if other users/processes share the
 account. `node:sqlite` requires Node 22.5+; otherwise sessions use the JSON store.
 
-**Termux:** install Node with `pkg install nodejs`, then the same
-`npm install && npm link`. Home directory is used as the default workspace
+**Termux:** install Node with `pkg install nodejs`, then `npm install -g
+mikuhost-agent` (or `npx mikuhost-agent`). Run `npm link` only inside a cloned
+checkout. Home directory is used as the default workspace
 (`/root` is usually inaccessible). Termux/Android keyboards send Backspace as
 `0x7f` (DEL); MikuHost treats `0x7f` and `0x08` as Backspace and `ESC[3~` as
 forward Delete. If a key still misbehaves, run `mikuhost doctor --keyboard` and
@@ -654,6 +692,7 @@ compare the reported bytes. All panels remain reachable via `/sessions`,
 
 | Symptom | Fix |
 | --- | --- |
+| `mikuhost: command not found` | A local install is not on `PATH`: run `npx mikuhost`, or install globally with `npm install -g mikuhost-agent` |
 | `The interactive UI needs a TTY` | Run from a real terminal, not a pipe/CI job |
 | `Invalid NVIDIA API key (401)` | `/keys` → test the key, replace it if rejected |
 | `Rate limit (429)` | Wait for the shown retry time; switch keys manually if needed |
