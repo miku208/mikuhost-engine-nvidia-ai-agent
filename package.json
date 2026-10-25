@@ -1,0 +1,38 @@
+{
+  "name": "mikuhost-agent",
+  "version": "1.0.0",
+  "description": "MikuHost Agent - a local-first, multi-model AI coding agent for the terminal (NVIDIA API)",
+  "type": "module",
+  "bin": {
+    "mikuhost": "bin/mikuhost.mjs"
+  },
+  "main": "src/index.mjs",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "scripts": {
+    "start": "node bin/mikuhost.mjs",
+    "test": "node --test --test-concurrency=1 tests/*.test.mjs",
+    "doctor": "node bin/mikuhost.mjs doctor"
+  },
+  "files": [
+    "bin",
+    "src",
+    "docs",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "ai",
+    "agent",
+    "cli",
+    "tui",
+    "nvidia",
+    "coding-assistant"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "ink": "^6.0.1",
+    "react": "^19.0.0"
+  }
+}
