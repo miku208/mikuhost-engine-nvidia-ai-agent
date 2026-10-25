@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { ConfigManager, DEFAULT_CONFIG, mergeWithDefaults, deepMerge, getPath, setPath } from '../src/config/manager.mjs';
 import { CredentialManager } from '../src/credentials/manager.mjs';
-import { CredentialStoreError, validateKeyFormat } from '../src/credentials/storage.mjs';
+import { CredentialStoreError, normalizeKeyInput, validateKeyFormat } from '../src/credentials/storage.mjs';
 import { maskKey, redactSecrets, titleFromPrompt, truncate } from '../src/util/text.mjs';
 import { parseArgs } from '../src/cli/arguments.mjs';
 import { paths } from '../src/config/paths.mjs';
@@ -12,6 +12,18 @@ import { tempDir, cleanupDir, setConfigDir, writeJson, readJson } from './helper
 
 const KEY_ONE = 'nvapi-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
 const KEY_TWO = 'nvapi-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
+
+test('credentials: pasted API keys lose terminal whitespace before validation', () => {
+  // SSH/Android paste commonly adds CRLF or wraps the key; both used to leave
+  // an invisible space that made a visually correct key fail authentication.
+  assert.equal(normalizeKeyInput('nvapi-abcdefgh12345678\r\n'), 'nvapi-abcdefgh12345678');
+  assert.equal(normalizeKeyInput('nvapi-abc def\tghi\n'), 'nvapi-abcdefghi');
+  assert.equal(normalizeKeyInput('\u200bnvapi-abc\ufeff'), 'nvapi-abc');
+  assert.deepEqual(validateKeyFormat(normalizeKeyInput('nvapi-abcdefgh12345678\n')), {
+    ok: true,
+    warning: null,
+  });
+});
 
 test('config: defaults, nested updates and persistence', () => {
   const dir = setConfigDir(tempDir());

@@ -114,7 +114,7 @@ mikuhost doctor
 Running `mikuhost` without a configuration or API key opens the setup wizard:
 
 1. Welcome screen.
-2. NVIDIA API key (input is masked; the key is never echoed).
+2. NVIDIA API key (shown in clear during setup so you can verify it; whitespace and line breaks are stripped).
 3. Key validation against `GET /v1/models`.
 4. Default model selection.
 5. Workspace confirmation (editable path).
@@ -318,7 +318,9 @@ Model selection is saved per session and to `defaultModel` in config.
 ## API keys
 
 Multiple keys are supported. All are stored in `credentials.json` with mode
-`0600`; the UI only ever shows a masked form (`nvapi-••••••••••••abcd`).
+`0600`. Outside the setup wizard the UI shows a masked form
+(`nvapi-••••••••••••abcd`); setup shows the full key once so a truncated or
+line-wrapped paste can be spotted and corrected before validation.
 
 ```bash
 mikuhost keys                        # list
@@ -568,7 +570,7 @@ Exit codes: `0` success, `1` runtime/doctor failure, `2` usage error.
 
 ```bash
 npm install
-npm test          # 160 tests, no network access required
+npm test          # 161 tests, no network access required
 ```
 
 The suite covers workspace/symlink escapes, sensitive files, the shell policy
@@ -660,7 +662,8 @@ compare the reported bytes. All panels remain reachable via `/sessions`,
 | No projects found | Increase depth only in code; check the workspace root |
 | Sessions not persisting | Check `mikuhost doctor` → session database and directory permissions |
 | Backspace does nothing | Update to this build; verify bytes with `mikuhost doctor --keyboard` (Backspace = `7f` or `08`) |
-| Prompt shows `•` bullets | A sensitive prompt field is masked; this is expected |
+| Prompt shows `•` bullets | A sensitive prompt field is masked; setup intentionally shows the NVIDIA key in clear for verification. |
+| Key invalid after pasting | Setup strips spaces/newlines automatically; the full key and its character count are shown before validation. |
 
 ## License
 

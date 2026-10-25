@@ -129,6 +129,15 @@ export function saveCredentialStore(store, file = paths.credentials()) {
   return normalized;
 }
 
+/**
+ * Remove bytes that can never be part of an API key. Terminal paste often adds
+ * a trailing newline or wraps a copied key across lines; keeping that
+ * whitespace produced a key that looked right but failed authentication.
+ */
+export function normalizeKeyInput(value) {
+  return String(value ?? '').replace(/[\s\u0000-\u001f\u007f\u200b-\u200d\ufeff]/g, '');
+}
+
 /** Basic structural validation. Never logs the value. */
 export function validateKeyFormat(key) {
   const value = String(key ?? '').trim();

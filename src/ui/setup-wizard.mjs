@@ -6,10 +6,9 @@ import { applyTextInput } from './input-edit.mjs';
 import { useRawInput } from './hooks/use-raw-input.mjs';
 import { NvidiaProvider } from '../providers/nvidia.mjs';
 import { ModelRegistry } from '../models/registry.mjs';
-import { validateKeyFormat } from '../credentials/storage.mjs';
+import { normalizeKeyInput, validateKeyFormat } from '../credentials/storage.mjs';
 import { Workspace } from '../security/workspace.mjs';
 import { paths } from '../config/paths.mjs';
-import { maskTyped, maskKey } from '../util/text.mjs';
 
 const STEPS = ['welcome', 'key', 'model', 'workspace', 'shell'];
 
@@ -55,7 +54,12 @@ export function SetupWizard({ config, credentials, initialWorkspace, initialMode
   const isRoot = typeof process.getuid === 'function' && process.getuid() === 0;
 
   async function validateKey() {
-    const check = validateKeyFormat(keyValue);
+    const key = normalizeKeyInput(keyValue);
+    if (key !== keyValue) {
+      setKeyValue(key);
+      setKeyCursor(key.length);
+    }
+    const check = validateKeyFormat(key);
     if (!check.ok) {
       setError(check.reason);
       return;
@@ -63,8 +67,8 @@ export function SetupWizard({ config, credentials, initialWorkspace, initialMode
     setError(null);
     setStep('validating');
     setBusyMessage('Validating NVIDIA API key…');
-    const provider = new NvidiaProvider({ baseUrl: config.baseUrl, apiKey: keyValue });
-    const result = await provider.validateKey(keyValue, { signal: AbortSignal.timeout(25_000) });
+    const provider = new NvidiaProvider({ baseUrl: config.baseUrl, apiKey: key });
+    const result = await provider.validateKey(key, { signal: AbortSignal.timeout(25_000) });
     if (!mounted.current) return;
     setBusyMessage(null);
     if (result.valid) {
@@ -88,13 +92,14 @@ export function SetupWizard({ config, credentials, initialWorkspace, initialMode
     setBusyMessage('Saving configuration…');
     try {
       const workspace = new Workspace(wsValue.trim() || initialWorkspace.root);
-      const existing = credentials.findByKey(keyValue);
+      const key = normalizeKeyInput(keyValue);
+      const existing = credentials.findByKey(key);
       let entry = existing;
       if (existing) {
         credentials.setStatus(existing.id, verified ? 'ready' : 'unverified');
         credentials.setActive(existing.id);
       } else {
-        entry = credentials.add({ name: 'Personal', key: keyValue, status: verified ? 'ready' : 'unverified' });
+        entry = credentials.add({ name: 'Personal', key, status: verified ? 'ready' : 'unverified' });
         credentials.setActive(entry.id);
       }
       const shellMode = shellIndex === 1 ? 'allow' : 'ask';
@@ -147,8 +152,12 @@ export function SetupWizard({ config, credentials, initialWorkspace, initialMode
         }
         const next = applyTextInput(keyValue, keyCursor, input, key, rawInput);
         if (next.changed) {
-          setKeyValue(next.value);
-          setKeyCursor(next.cursor);
+          // API keys never contain whitespace. A terminal paste can add a
+          // trailing newline or line-wrap the key; stripping it here keeps the
+          // displayed value identical to what is validated and stored.
+          const value = normalizeKeyInput(next.value);
+          setKeyValue(value);
+          setKeyCursor(value === next.value ? next.cursor : value.length);
         }
         return;
       }
@@ -277,21 +286,27 @@ export function SetupWizard({ config, credentials, initialWorkspace, initialMode
     content.push(
       h(Text, { color: theme.accent, bold: true }, 'NVIDIA API KEY'),
       h(Box, { marginTop: 1, flexDirection: 'column' },
-        h(Hint, null, 'Get a key from build.nvidia.com. It is stored locally with mode 0600'),
-        h(Hint, null, 'and is only ever shown masked. It is never sent anywhere except NVIDIA.'),
+        h(Hint, null, 'Get a key from build.nvidia.com. It is stored locally with mode 0600.'),
+        h(Hint, null, 'Shown in clear during setup so you can verify it was pasted in full.'),
+        h(Hint, null, 'Whitespace and line breaks are removed automatically.'),
       ),
       h(Box, { marginTop: 1 },
         h(Text, { color: theme.yellow }, '> '),
         step === 'validating'
-          ? h(Text, { color: theme.dim }, maskKey(keyValue))
+          ? h(Text, { color: theme.text, wrap: 'wrap' }, keyValue || '(empty)')
           : h(
-              Box,
-              {},
-              h(Text, { color: theme.text }, maskTyped(keyValue.slice(0, keyCursor))),
-              h(Text, { backgroundColor: theme.accent, color: '#0d1117' }, keyCursor < keyValue.length ? '•' : ' '),
-              h(Text, { color: theme.text }, maskTyped(keyValue.slice(keyCursor + 1))),
+              Text,
+              { color: theme.text, wrap: 'wrap' },
+              keyValue.slice(0, keyCursor),
+              h(
+                Text,
+                { backgroundColor: theme.accent, color: '#0d1117' },
+                keyCursor < keyValue.length ? keyValue[keyCursor] : ' ',
+              ),
+              keyValue.slice(keyCursor + 1),
             ),
       ),
+      h(Hint, null, `${keyValue.length} characters · press Enter to validate`),
       error ? h(Text, { color: theme.red }, error) : null,
       busyMessage ? h(Text, { color: theme.yellow }, busyMessage) : null,
       h(Box, { marginTop: 1 },
@@ -304,7 +319,10 @@ export function SetupWizard({ config, credentials, initialWorkspace, initialMode
     content.push(
       h(Text, { color: theme.red, bold: true }, 'KEY COULD NOT BE USED'),
       h(Box, { marginTop: 1 }, h(Text, { color: theme.text, wrap: 'wrap' }, error ?? 'The provider rejected this key.')),
-      h(Hint, null, `Key: ${maskKey(keyValue)}`),
+      h(Box, { marginTop: 1, flexDirection: 'column' },
+        h(Hint, null, `Key (${keyValue.length} chars):`),
+        h(Text, { color: theme.text, wrap: 'wrap' }, keyValue || '(empty)'),
+      ),
       h(Box, { marginTop: 1 },
         h(Text, { color: theme.green, bold: true }, '[R] Retry'),
         h(Hint, null, '    [P] Replace key'),
@@ -435,7 +453,7 @@ export function SetupWizard({ config, credentials, initialWorkspace, initialMode
       Box,
       { marginTop: 1, justifyContent: 'space-between' },
       h(Text, { color: theme.faint }, `MikuHost Agent v${version ?? ''}`),
-      h(Text, { color: theme.faint }, step === 'welcome' ? 'Esc exits' : 'Your key never leaves this machine'),
+      h(Text, { color: theme.faint }, step === 'welcome' ? 'Esc exits' : 'Stored locally · sent only to NVIDIA'),
     ),
   );
 }
