@@ -1,6 +1,7 @@
 import { Box, Text } from 'ink';
 import { h } from '../h.mjs';
 import { theme } from '../theme.mjs';
+import { wrapCommandLines } from '../text-layout.mjs';
 
 function Field({ label, value, color = theme.text }) {
   return h(
@@ -8,6 +9,23 @@ function Field({ label, value, color = theme.text }) {
     {},
     h(Text, { color: theme.dim }, `${label.padEnd(10)} `),
     h(Text, { color, wrap: 'truncate' }, String(value)),
+  );
+}
+
+/**
+ * The command is the thing being approved, so it is shown in full (wrapped)
+ * instead of truncated to one line: a cut-off command cannot be reviewed.
+ */
+function CommandBlock({ command, width, limit }) {
+  const { lines, hidden } = wrapCommandLines(command, Math.max(20, width - 4), limit);
+  return h(
+    Box,
+    { flexDirection: 'column' },
+    h(Text, { color: theme.dim }, 'Command:'),
+    ...lines.map((line, index) =>
+      h(Text, { key: `cmd-${index}`, color: theme.text, wrap: 'truncate' }, `  ${line}`),
+    ),
+    hidden ? h(Text, { color: theme.faint }, `  … ${hidden} more line(s) not shown`) : null,
   );
 }
 
@@ -49,6 +67,10 @@ export function ApprovalDialog({ request, width, maxHeight = 24 }) {
   const diffLimit = Math.max(3, Math.min(8, maxHeight - 9));
   const previewLimit = Math.max(2, Math.min(6, maxHeight - 10));
   const reasonLimit = Math.max(1, Math.min(2, maxHeight - 11));
+  const commandLineLimit = Math.max(3, Math.min(10, maxHeight - 10));
+  const dialogWidth = Math.min(width - 2, 100);
+  const modeLabel =
+    request.mode === 'auto' ? 'UNATTENDED' : request.mode === 'allow' ? 'ALWAYS ALLOW' : 'ALWAYS ASK';
 
   return h(
     Box,
@@ -57,15 +79,13 @@ export function ApprovalDialog({ request, width, maxHeight = 24 }) {
       borderStyle: 'round',
       borderColor: theme.yellow,
       paddingX: 1,
-      width: Math.min(width - 2, 100),
+      width: dialogWidth,
       flexShrink: 0,
     },
     h(Text, { bold: true, color: theme.yellow }, title),
-    h(Field, {
-      label: isCommand ? 'Command:' : 'Target:',
-      value: isCommand ? request.command : request.target,
-      color: theme.text,
-    }),
+    isCommand
+      ? h(CommandBlock, { command: request.command, width: dialogWidth, limit: commandLineLimit })
+      : h(Field, { label: 'Target:', value: request.target, color: theme.text }),
     isCommand
       ? h(Field, { label: 'Directory:', value: request.cwd })
       : request.reason
@@ -74,7 +94,7 @@ export function ApprovalDialog({ request, width, maxHeight = 24 }) {
     isCommand
       ? h(Field, {
           label: 'Mode:',
-          value: `${request.mode === 'allow' ? 'ALWAYS ALLOW' : 'ALWAYS ASK'} · ${request.riskLabel ?? request.risk ?? 'unknown'}`,
+          value: `${modeLabel} · ${request.riskLabel ?? request.risk ?? 'unknown'}`,
           color: riskColor,
         })
       : null,

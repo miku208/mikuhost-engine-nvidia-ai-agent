@@ -41,13 +41,36 @@ test('config: defaults, nested updates and persistence', () => {
 
     // Regression: nested defaults must not be shared with the saved config.
     assert.equal(DEFAULT_CONFIG.permissions.shell, 'ask');
-    assert.equal(DEFAULT_CONFIG.agent.maxIterations, 20);
+    assert.equal(DEFAULT_CONFIG.agent.maxIterations, 0, '0 means no iteration cap');
 
     const reloaded = new ConfigManager().load();
     assert.equal(reloaded.workspace, '/tmp');
     assert.equal(reloaded.permissions.shell, 'allow');
     assert.equal(reloaded.agent.maxIterations, 7);
     assert.equal(fs.statSync(paths.config()).mode & 0o777, 0o600);
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test('config: unattended permission values persist and report as the mode', () => {
+  const dir = setConfigDir(tempDir());
+  try {
+    writeJson(paths.config(), {
+      permissions: { shell: 'auto', fileWrite: 'auto', sensitiveRead: 'allow' },
+    });
+    const config = new ConfigManager().load();
+    assert.equal(config.permissions.shell, 'auto');
+    assert.equal(config.permissions.fileWrite, 'auto');
+    assert.equal(config.permissions.sensitiveRead, 'allow');
+    const loadedManager = new ConfigManager();
+    loadedManager.load();
+    assert.equal(loadedManager.permissionMode, 'auto');
+
+    loadedManager.setValue('permissions.shell', 'ask');
+    const reloadedManager = new ConfigManager();
+    reloadedManager.load();
+    assert.equal(reloadedManager.permissionMode, 'ask');
   } finally {
     cleanupDir(dir);
   }
@@ -63,7 +86,7 @@ test('config: invalid values are normalised, corrupt files are preserved', () =>
     const config = new ConfigManager().load();
     assert.equal(config.permissions.shell, 'ask');
     assert.equal(config.permissions.fileWrite, 'ask');
-    assert.equal(config.agent.maxIterations, 60);
+    assert.equal(config.agent.maxIterations, 1000);
     assert.equal(config.agent.commandTimeoutMs, 1000);
 
     fs.writeFileSync(paths.config(), '{ not json');
@@ -153,6 +176,64 @@ test('credentials: duplicate and malformed keys are rejected', () => {
   }
 });
 
+test('credentials: automatic key choice validates the provider and randomises several keys', () => {
+  const dir = setConfigDir(tempDir());
+  try {
+    const manager = new CredentialManager();
+    const nvOne = manager.add({ name: 'N1', key: KEY_ONE, status: 'ready' });
+    const nvTwo = manager.add({ name: 'N2', key: KEY_TWO, status: 'ready' });
+    const harbor = manager.add({ name: 'Harbor', key: 'thk_harbor0000000000000000000000000000', status: 'ready' });
+    // A Token Harbor token filed under the NVIDIA label is still Token Harbor:
+    // the prefix is what the request trusts.
+    const mislabelled = manager.add({
+      name: 'Mislabelled',
+      key: 'thk_wronglabel000000000000000000000000',
+      provider: 'nvidia',
+      status: 'ready',
+    });
+    assert.equal(manager.get(mislabelled.id).provider, 'nvidia');
+    assert.equal(manager.list().find((entry) => entry.id === mislabelled.id).provider, 'tokenharbor');
+    assert.deepEqual(manager.providers().sort(), ['nvidia', 'tokenharbor']);
+
+    // Random among the two NVIDIA keys, never the Token Harbor ones.
+    assert.equal(manager.pickForProvider('nvidia', { random: () => 0 }).id, nvOne.id);
+    assert.equal(manager.pickForProvider('nvidia', { random: () => 0.99 }).id, nvTwo.id);
+    assert.equal(manager.pickForProvider('tokenharbor', { random: () => 0 }).id, harbor.id);
+    assert.equal(manager.pickForProvider('tokenharbor', { random: () => 0.99 }).id, mislabelled.id);
+
+    // A manual choice owns the next request, then automatic selection resumes.
+    manager.setActive(nvOne.id);
+    assert.equal(manager.pickForProvider('nvidia', { random: () => 0.99 }).id, nvOne.id);
+    assert.equal(manager.pickForProvider('nvidia', { random: () => 0.99 }).id, nvTwo.id);
+
+    // Invalid keys are skipped.
+    manager.setStatus(nvOne.id, 'invalid', 'HTTP 401');
+    assert.equal(manager.pickForProvider('nvidia', { random: () => 0 }).id, nvTwo.id);
+    assert.equal(manager.pickForProvider('custom'), null);
+
+    // A 403 is an account problem, not a dead key: it stays selectable with the
+    // provider's own message (TokenHarbor: verify your email address).
+    manager.reportFailure(harbor.id, 403, 'Verify your email address to use the API.');
+    const blocked = manager.list().find((entry) => entry.id === harbor.id);
+    assert.equal(blocked.status, 'blocked');
+    assert.match(blocked.lastError, /HTTP 403/);
+    assert.match(blocked.lastError, /Verify your email/);
+    // Blocked is not INVALID: it is still an eligible credential.
+    assert.ok(manager.entries().some((entry) => entry.id === harbor.id && entry.status === 'blocked'));
+
+    // A 401 still means the key itself is invalid.
+    manager.reportFailure(nvTwo.id, 401, 'invalid credential');
+    assert.equal(manager.list().find((entry) => entry.id === nvTwo.id).status, 'invalid');
+
+    // When every key of a provider is INVALID the request is still attempted,
+    // so the provider's own error wins over a misleading "no key".
+    manager.setStatus(nvTwo.id, 'invalid', 'HTTP 401');
+    assert.ok([nvOne.id, nvTwo.id].includes(manager.pickForProvider('nvidia', { random: () => 0 }).id));
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
 test('credentials: optional AES-256-GCM encryption at rest', () => {
   const dir = setConfigDir(tempDir());
   const previous = process.env.MIKUHOST_ENCRYPTION_KEY;
@@ -234,6 +315,24 @@ test('credentials file is never written inside the workspace by accident', () =>
     const stored = readJson(path.join(dir, 'credentials.json'));
     assert.equal(stored.keys[0].key, KEY_ONE);
     assert.equal(fs.existsSync(paths.config()), false);
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test('config: the legacy 20-iteration default migrates to no cap', () => {
+  const dir = setConfigDir(tempDir());
+  try {
+    // v1 always wrote agent.maxIterations: 20, even when the user never chose
+    // it, so upgrading must not keep silently cutting long tasks short.
+    writeJson(paths.config(), { version: 1, agent: { maxIterations: 20 } });
+    const migrated = new ConfigManager().load();
+    assert.equal(migrated.agent.maxIterations, 0);
+    assert.equal(migrated.version, 2);
+
+    writeJson(paths.config(), { version: 2, agent: { maxIterations: 20 } });
+    const explicit = new ConfigManager().load();
+    assert.equal(explicit.agent.maxIterations, 20, 'a v2 cap is a deliberate choice');
   } finally {
     cleanupDir(dir);
   }

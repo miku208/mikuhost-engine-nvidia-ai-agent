@@ -42,6 +42,136 @@ test('provider: model catalogue and key validation', async () => {
   );
 });
 
+test('provider: validation sends a real chat completion, not just /models', async () => {
+  await withServer(
+    (req, res) => {
+      if (req.url.endsWith('/chat/completions')) {
+        if (req.headers.authorization !== `Bearer ${KEY}`) {
+          sendJson(res, 401, { error: { message: 'invalid credential' } });
+          return;
+        }
+        sendJson(res, 200, { choices: [{ message: { content: 'pong' }, finish_reason: 'stop' }] });
+        return;
+      }
+      // The catalogue is gated independently of chat: a broken /models must not
+      // hide a working key, and a working /models must not vouch for a broken one.
+      sendJson(res, 401, { error: { message: 'catalogue unavailable' } });
+    },
+    async (server) => {
+      const provider = new NvidiaProvider({ baseUrl: server.url, apiKey: 'nvapi-placeholder-000000000' });
+      const good = await provider.validateKey(KEY, { model: MODEL });
+      assert.equal(good.valid, true);
+      assert.equal(good.model, MODEL);
+      assert.deepEqual(good.models, []);
+
+      const bad = await provider.validateKey('nvapi-wrongkey-000000000000', { model: MODEL });
+      assert.equal(bad.valid, false);
+      assert.equal(bad.offline, false);
+      assert.equal(bad.error.code, ERROR_CODES.AUTH);
+
+      const chat = server.requests.filter((request) => request.url.endsWith('/chat/completions'));
+      assert.equal(chat.length, 2);
+      assert.equal(chat[0].json.model, MODEL);
+      assert.equal(chat[0].headers.authorization, `Bearer ${KEY}`);
+      assert.ok(Array.isArray(chat[0].json.messages));
+      assert.equal(chat[0].json.messages[0].role, 'user');
+    },
+  );
+});
+
+test('provider: validation waits for Retry-After and retries a rate-limited key', async () => {
+  let attempts = 0;
+  await withServer(
+    (req, res) => {
+      if (!req.url.endsWith('/chat/completions')) {
+        sendJson(res, 200, { data: [{ id: MODEL }] });
+        return;
+      }
+      attempts += 1;
+      if (attempts === 1) {
+        sendJson(res, 429, { error: { message: 'rate limited' } }, { 'Retry-After': '1' });
+        return;
+      }
+      sendJson(res, 200, { choices: [{ message: { content: 'pong' }, finish_reason: 'stop' }] });
+    },
+    async (server) => {
+      const provider = new NvidiaProvider({ baseUrl: server.url, apiKey: KEY });
+      const waits = [];
+      const started = Date.now();
+      const result = await provider.validateKey(KEY, {
+        model: MODEL,
+        onWait: (info) => waits.push(info),
+      });
+      assert.equal(result.valid, true);
+      assert.equal(result.models.length, 1);
+      assert.equal(attempts, 2);
+      assert.equal(waits.length, 1);
+      assert.equal(waits[0].waitMs, 1000);
+      assert.ok(
+        Date.now() - started >= 900,
+        'the retry must actually wait for Retry-After',
+      );
+    },
+  );
+});
+
+test('provider: a key that stays rate limited is not marked invalid', async () => {
+  await withServer(
+    (req, res) => sendJson(res, 429, { error: { message: 'rate limited' } }, { 'Retry-After': '0' }),
+    async (server) => {
+      const provider = new NvidiaProvider({ baseUrl: server.url, apiKey: KEY });
+      const result = await provider.validateKey(KEY, { model: MODEL });
+      assert.equal(result.valid, false);
+      assert.equal(result.rateLimited, true);
+      assert.equal(result.error.code, ERROR_CODES.RATE_LIMIT);
+    },
+  );
+});
+
+test('provider: 403 account verification is blocked, not an invalid key', async () => {
+  // TokenHarbor answers an unverified account exactly like this on both
+  // endpoints; the bearer token was recognised, so the key is not the problem.
+  const body = {
+    error: {
+      message:
+        'Verify your email address to use the API. We sent a confirmation link when you signed up — open it, or request a new one at https://tokenharbor.ai/dashboard, then retry this request.',
+      type: 'email_verification_required',
+      code: 'email_verification_required',
+    },
+  };
+  await withServer(
+    (req, res) => sendJson(res, 403, body),
+    async (server) => {
+      const provider = new NvidiaProvider({ baseUrl: server.url, apiKey: KEY });
+      const result = await provider.validateKey(KEY, { model: 'deepseek-v4.1-flash:free' });
+      assert.equal(result.valid, false);
+      assert.equal(result.blocked, true);
+      assert.equal(result.accountBlocked, true);
+      assert.equal(result.error.code, ERROR_CODES.ACCOUNT);
+      assert.equal(result.error.httpStatus, 403);
+      assert.match(result.error.message, /Verify your email address/);
+      assert.match(result.error.message, /https:\/\/tokenharbor\.ai\/dashboard/);
+
+      const catalogue = classifyHttpError(403, JSON.stringify(body), { get: () => null });
+      assert.equal(catalogue.code, ERROR_CODES.ACCOUNT);
+    },
+  );
+});
+
+test('provider: a plain 403 is blocked, never reported as an invalid key', async () => {
+  await withServer(
+    (req, res) => sendJson(res, 403, { error: { message: 'model not enabled for this key' } }),
+    async (server) => {
+      const provider = new NvidiaProvider({ baseUrl: server.url, apiKey: KEY });
+      const result = await provider.validateKey(KEY, { model: MODEL });
+      assert.equal(result.valid, false);
+      assert.equal(result.blocked, true);
+      assert.equal(result.accountBlocked, undefined);
+      assert.equal(result.error.code, ERROR_CODES.FORBIDDEN);
+    },
+  );
+});
+
 test('provider: offline validation is reported as offline, not valid or invalid', async () => {
   const provider = new NvidiaProvider({ baseUrl: 'http://127.0.0.1:1/v1', apiKey: KEY, timeoutMs: 2000 });
   const result = await provider.validateKey(KEY);
@@ -169,7 +299,7 @@ test('provider: auth and model errors are classified', async () => {
         modelError = error;
       }
       assert.equal(modelError.code, ERROR_CODES.INVALID_MODEL);
-      assert.match(modelError.message, /Model unavailable for current NVIDIA credential/);
+      assert.match(modelError.message, /Model unavailable for this credential/);
     },
   );
 });

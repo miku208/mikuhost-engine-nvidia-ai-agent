@@ -106,6 +106,18 @@ function stripInlineMarkdown(text) {
  * The welcome header lives at the top of the transcript, not in a sticky
  * layout row. It scrolls away with the conversation.
  */
+/**
+ * Wrap a shell command for a preview that must not scroll off the screen.
+ * Returns the visible lines plus how many wrapped lines were cut, so the caller
+ * can say so instead of silently hiding the rest of the command.
+ */
+export function wrapCommandLines(command, width, limit = 8) {
+  const lines = wrapText(String(command ?? ''), Math.max(8, width));
+  const max = Math.max(1, Math.floor(limit));
+  if (lines.length <= max) return { lines, hidden: 0 };
+  return { lines: lines.slice(0, max), hidden: lines.length - max };
+}
+
 export function buildHeaderLines({ model = '—', workspace = '—', session = 'New Session', version = null, width = 80 } = {}) {
   const contentWidth = Math.max(20, width - 4);
   const rule = '─'.repeat(contentWidth);

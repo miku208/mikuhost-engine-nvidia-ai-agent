@@ -46,7 +46,8 @@ test('cli: keys add/list/use/rename/remove never print the raw key', () => {
 
     const list = run(['keys'], env);
     assert.equal(list.status, 0);
-    assert.match(list.stdout, /NVIDIA API KEYS/);
+    assert.match(list.stdout, /API KEYS/);
+    assert.match(list.stdout, /NVIDIA/);
     assert.match(list.stdout, /Work/);
     assert.match(list.stdout, /nvapi-••••/);
     assert.equal(list.stdout.includes(key), false);
@@ -119,7 +120,8 @@ test('cli: doctor reports environment without leaking credentials', () => {
     assert.match(result.stdout, /SQLite/);
     assert.match(result.stdout, /Workspace/);
     assert.match(result.stdout, /Session database/);
-    assert.match(result.stdout, /NVIDIA API keys/);
+    assert.match(result.stdout, /API keys/);
+    assert.match(result.stdout, /Active provider/);
   } finally {
     cleanupDir(dir);
   }

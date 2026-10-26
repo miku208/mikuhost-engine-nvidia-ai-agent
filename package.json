@@ -1,7 +1,7 @@
 {
   "name": "mikuhost-agent",
-  "version": "1.0.1",
-  "description": "MikuHost Agent - a local-first, multi-model AI coding agent for the terminal (NVIDIA API)",
+  "version": "1.2.0",
+  "description": "MikuHost Agent - a local-first, multi-provider AI coding agent for the terminal (NVIDIA, Token Harbor, OpenAI-compatible)",
   "type": "module",
   "bin": {
     "mikuhost": "bin/mikuhost.mjs",
@@ -31,6 +31,8 @@
     "cli",
     "tui",
     "nvidia",
+    "tokenharbor",
+    "openai-compatible",
     "coding-assistant"
   ],
   "license": "MIT",

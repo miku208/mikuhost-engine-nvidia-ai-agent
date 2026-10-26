@@ -21,6 +21,9 @@ export const paths = {
   credentials: () => path.join(configDir(), 'credentials.json'),
   sessions: () => path.join(configDir(), 'sessions.db'),
   sessionsFallback: () => path.join(configDir(), 'sessions.json'),
+  // Pre-edit snapshots used by /undo (index + one file per snapshot).
+  historyDir: () => path.join(configDir(), 'history'),
+  historyIndex: () => path.join(configDir(), 'history', 'index.json'),
   logs: () => path.join(configDir(), 'logs'),
   logFile: () => path.join(configDir(), 'logs', 'mikuhost.log'),
 };

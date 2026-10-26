@@ -4,7 +4,7 @@ import { h } from './h.mjs';
 import { theme, SYMBOLS } from './theme.mjs';
 import { applyTextInput } from './input-edit.mjs';
 import { useRawInput } from './hooks/use-raw-input.mjs';
-import { NvidiaProvider } from '../providers/nvidia.mjs';
+import { createProvider, detectProviderFromKey, providerName } from '../providers/catalog.mjs';
 import { ModelRegistry } from '../models/registry.mjs';
 import { normalizeKeyInput, validateKeyFormat } from '../credentials/storage.mjs';
 import { Workspace } from '../security/workspace.mjs';
@@ -12,25 +12,34 @@ import { paths } from '../config/paths.mjs';
 
 const STEPS = ['welcome', 'key', 'model', 'workspace', 'shell'];
 
+function modelsForProvider(allModels, providerId) {
+  const scoped = allModels.filter((entry) => (entry.provider ?? 'nvidia') === providerId);
+  return scoped.length ? scoped : allModels;
+}
+
 function Hint({ children, color = theme.dim }) {
   return h(Text, { color }, children);
 }
 
 export function SetupWizard({ config, credentials, initialWorkspace, initialModel, version, onComplete, width = 80, height = 24 }) {
   const { exit } = useApp();
-  const models = useMemo(() => {
+  const allModels = useMemo(() => {
     const registry = new ModelRegistry({
       userModels: config.get().models,
       defaultModel: config.get().defaultModel,
     });
     return registry.list();
   }, [config]);
+  // The provider follows the pasted key: nvapi- is NVIDIA, thk_ is TokenHarbor.
+  const [providerId, setProviderId] = useState(() => config.providerId);
+  const models = useMemo(() => modelsForProvider(allModels, providerId), [allModels, providerId]);
 
   const [step, setStep] = useState('welcome');
   const [keyValue, setKeyValue] = useState('');
   const [keyCursor, setKeyCursor] = useState(0);
   const [modelIndex, setModelIndex] = useState(() => {
-    const index = models.findIndex((model) => model.id === (initialModel ?? config.get().defaultModel));
+    const wanted = initialModel ?? config.modelFor(config.providerId) ?? config.get().defaultModel;
+    const index = allModels.findIndex((model) => model.id === wanted);
     return index === -1 ? 0 : index;
   });
   const [wsValue, setWsValue] = useState(initialWorkspace?.root ?? '/root');
@@ -66,13 +75,31 @@ export function SetupWizard({ config, credentials, initialWorkspace, initialMode
     }
     setError(null);
     setStep('validating');
-    setBusyMessage('Validating NVIDIA API key…');
-    const provider = new NvidiaProvider({ baseUrl: config.baseUrl, apiKey: key });
-    const result = await provider.validateKey(key, { signal: AbortSignal.timeout(25_000) });
+    const detected = detectProviderFromKey(key) ?? providerId;
+    const probeModel = config.modelFor(detected) ?? modelsForProvider(allModels, detected)[0]?.id ?? null;
+    setBusyMessage(
+      `Validating ${providerName(detected)} API key with a real completion${probeModel ? ` (${probeModel})` : ''}…`,
+    );
+    const provider = createProvider({
+      provider: detected,
+      baseUrl: config.baseUrlFor(detected),
+      apiKey: key,
+    });
+    // One verification request (plus one retry after a 429 delay), exactly like
+    // the curl in the docs, so a key that lists models but cannot chat is caught.
+    const result = await provider.validateKey(key, {
+      signal: AbortSignal.timeout(60_000),
+      model: probeModel,
+    });
     if (!mounted.current) return;
     setBusyMessage(null);
     if (result.valid) {
       setVerified(true);
+      setProviderId(detected);
+      const scoped = modelsForProvider(allModels, detected);
+      const wanted = config.modelFor(detected);
+      const index = scoped.findIndex((entry) => entry.id === wanted);
+      setModelIndex(index === -1 ? 0 : index);
       setStep('model');
       return;
     }
@@ -99,14 +126,21 @@ export function SetupWizard({ config, credentials, initialWorkspace, initialMode
         credentials.setStatus(existing.id, verified ? 'ready' : 'unverified');
         credentials.setActive(existing.id);
       } else {
-        entry = credentials.add({ name: 'Personal', key, status: verified ? 'ready' : 'unverified' });
+        entry = credentials.add({
+          name: 'Personal',
+          key,
+          provider: providerId,
+          status: verified ? 'ready' : 'unverified',
+        });
         credentials.setActive(entry.id);
       }
       const shellMode = shellIndex === 1 ? 'allow' : 'ask';
       config.update({
         setupComplete: true,
         workspace: workspace.root,
+        provider: providerId,
         defaultModel: model.id,
+        providers: { [providerId]: { defaultModel: model.id } },
         permissions: { shell: shellMode },
       });
       await new Promise((resolve) => setTimeout(resolve, 120));
@@ -276,7 +310,7 @@ export function SetupWizard({ config, credentials, initialWorkspace, initialMode
       ),
       h(Box, { marginTop: 1, flexDirection: 'column' },
         h(Hint, null, `Workspace   ${initialWorkspace?.root ?? '/root'}`),
-        h(Hint, null, `Provider    NVIDIA (OpenAI-compatible)`),
+        h(Hint, null, `Provider    ${providerName(providerId)} (OpenAI-compatible)`),
         h(Hint, null, `Model       ${model?.name ?? 'unknown'}`),
         h(Hint, null, `Config      ${paths.dir()}`),
       ),
@@ -284,9 +318,11 @@ export function SetupWizard({ config, credentials, initialWorkspace, initialMode
     );
   } else if (step === 'key' || step === 'validating') {
     content.push(
-      h(Text, { color: theme.accent, bold: true }, 'NVIDIA API KEY'),
+      h(Text, { color: theme.accent, bold: true }, 'API KEY'),
       h(Box, { marginTop: 1, flexDirection: 'column' },
-        h(Hint, null, 'Get a key from build.nvidia.com. It is stored locally with mode 0600.'),
+        h(Hint, null, 'NVIDIA keys start with nvapi- and come from build.nvidia.com.'),
+        h(Hint, null, 'TokenHarbor keys start with thk_. The provider is detected automatically.'),
+        h(Hint, null, 'The key is stored locally with mode 0600.'),
         h(Hint, null, 'Shown in clear during setup so you can verify it was pasted in full.'),
         h(Hint, null, 'Whitespace and line breaks are removed automatically.'),
       ),
@@ -311,7 +347,7 @@ export function SetupWizard({ config, credentials, initialWorkspace, initialMode
       busyMessage ? h(Text, { color: theme.yellow }, busyMessage) : null,
       h(Box, { marginTop: 1 },
         step === 'validating'
-          ? h(Hint, null, 'Checking the key against the NVIDIA model catalogue…')
+          ? h(Hint, null, 'Checking the key against the provider model catalogue…')
           : h(Box, {}, h(Text, { color: theme.green, bold: true }, '[Enter] Continue'), h(Hint, null, '    [Esc] Back')),
       ),
     );
@@ -333,7 +369,7 @@ export function SetupWizard({ config, credentials, initialWorkspace, initialMode
     content.push(
       h(Text, { color: theme.yellow, bold: true }, 'NETWORK UNREACHABLE'),
       h(Box, { marginTop: 1, flexDirection: 'column' },
-        h(Hint, null, 'The key could not be verified because NVIDIA is unreachable.'),
+        h(Hint, null, `The key could not be verified because ${providerName(providerId)} is unreachable.`),
         h(Hint, null, 'You can save it as UNVERIFIED. It will not be marked valid, and the'),
         h(Hint, null, 'agent will fail cleanly at request time if the key is wrong.'),
       ),
@@ -453,7 +489,7 @@ export function SetupWizard({ config, credentials, initialWorkspace, initialMode
       Box,
       { marginTop: 1, justifyContent: 'space-between' },
       h(Text, { color: theme.faint }, `MikuHost Agent v${version ?? ''}`),
-      h(Text, { color: theme.faint }, step === 'welcome' ? 'Esc exits' : 'Stored locally · sent only to NVIDIA'),
+      h(Text, { color: theme.faint }, step === 'welcome' ? 'Esc exits' : `Stored locally · sent only to ${providerName(providerId)}`),
     ),
   );
 }

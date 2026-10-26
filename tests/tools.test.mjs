@@ -302,6 +302,25 @@ test('tools: allow mode auto-runs read-only commands but not destructive ones', 
   }
 });
 
+test('tools: unattended mode runs destructive commands and sensitive writes without approval', async () => {
+  const root = workspaceFixture();
+  try {
+    const unattended = setup({ root, permissions: { shell: 'auto', fileWrite: 'auto', sensitiveRead: 'auto' } });
+    const result = await unattended.registry.execute('run_command', { command: 'rm -rf project/node_modules' });
+    assert.equal(result.ok, true);
+    assert.equal(unattended.approvals.length, 0);
+    assert.equal(fs.existsSync(path.join(root, 'project/node_modules')), false);
+
+    const secret = await unattended.registry.execute('read_file', { path: 'project/.env' });
+    assert.equal(secret.ok, true);
+    const write = await unattended.registry.execute('write_file', { path: 'project/.env', content: 'A=1\n' });
+    assert.equal(write.ok, true);
+    assert.equal(unattended.approvals.length, 0);
+  } finally {
+    cleanupDir(root);
+  }
+});
+
 test('tools: run_command enforces timeouts and kills the process', async () => {
   const { registry } = setup();
   const started = Date.now();

@@ -1,6 +1,7 @@
 import { Box, Text } from 'ink';
 import { h } from '../h.mjs';
 import { theme } from '../theme.mjs';
+import { providerName } from '../../providers/catalog.mjs';
 import { PanelFrame, PanelRow, PanelHint, EmptyState } from '../components/panel-frame.mjs';
 
 function capabilityText(capabilities) {
@@ -35,7 +36,9 @@ export function ModelsPanel({ models, selected, activeId, width, statusMessage, 
             selected: index === selected,
             marker: { text: model.id === activeId ? '●' : '○', color: model.id === activeId ? theme.green : theme.faint },
             label: model.name,
-            detail: model.id === activeId ? 'active' : availabilityText(model.availability).text,
+            // The provider is part of the row: both providers ship a DeepSeek
+            // model and only the provider's key can serve each one.
+            detail: `${providerName(model.provider)} · ${model.id === activeId ? 'active' : availabilityText(model.availability).text}`,
             detailColor: model.id === activeId ? theme.green : availabilityText(model.availability).color,
           }),
         ),
@@ -46,12 +49,13 @@ export function ModelsPanel({ models, selected, activeId, width, statusMessage, 
           h(Text, { color: theme.dim }, current.id),
           h(Text, { color: theme.faint }, capabilityText(current.capabilities)),
           current.availability?.status === 'unavailable'
-            ? h(Text, { color: theme.red }, `Model unavailable for current NVIDIA credential. ${current.availability.reason ?? ''}`)
+            ? h(Text, { color: theme.red }, `Model unavailable. ${current.availability.reason ?? ''}`)
             : null,
         )
       : null,
     statusMessage ? h(PanelHint, { color: theme.yellow }, statusMessage) : null,
     refreshError ? h(PanelHint, { color: theme.red }, refreshError) : null,
+    h(PanelHint, { color: theme.faint }, "Selecting a model also switches to that model's provider; when several keys for it are stored, one is picked at random for each request."),
     h(PanelHint, { color: theme.faint }, 'Capabilities are unverified until the provider catalogue is checked; the agent falls back to a text tool protocol when a model has no native tool calling.'),
   );
 }

@@ -57,6 +57,7 @@ export const editFileTool = {
     });
 
     if (ctx.signal?.aborted) throw new ToolError('Operation cancelled.', 'ABORTED');
+    ctx.recordFileSnapshot?.({ absolute, tool: 'edit_file', previous: text, next: updated });
     fs.writeFileSync(absolute, updated, 'utf8');
     const rel = relativeInside(ctx.workspace, absolute);
     ctx.activity(`Edited ${rel} (${occurrences} ${occurrences === 1 ? 'change' : 'changes'})`);

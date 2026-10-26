@@ -199,10 +199,22 @@ export class SqliteSessionStore {
     return { id: String(result.lastInsertRowid), role, content: safeText(content), toolName, meta: safeMeta(meta), createdAt: now };
   }
 
-  getMessages(sessionId, { limit = 500 } = {}) {
+  /**
+   * Whole transcript by default: a saved conversation must reopen complete.
+   * A finite `limit` returns the NEWEST messages (still oldest-first), never a
+   * stale head that would hide everything said after message ~500.
+   */
+  getMessages(sessionId, { limit = null } = {}) {
+    const max = Number(limit) > 0 ? Math.floor(Number(limit)) : null;
+    if (max) {
+      const rows = this.db
+        .prepare('SELECT * FROM messages WHERE session_id = ? ORDER BY id DESC LIMIT ?')
+        .all(sessionId, max);
+      return rows.reverse().map(rowToMessage);
+    }
     const rows = this.db
-      .prepare('SELECT * FROM messages WHERE session_id = ? ORDER BY id ASC LIMIT ?')
-      .all(sessionId, limit);
+      .prepare('SELECT * FROM messages WHERE session_id = ? ORDER BY id ASC')
+      .all(sessionId);
     return rows.map(rowToMessage);
   }
 
@@ -313,11 +325,11 @@ export class JsonSessionStore {
     return { ...rest, id: String(message.id) };
   }
 
-  getMessages(sessionId, { limit = 500 } = {}) {
-    return this.data.messages
-      .filter((message) => message.sessionId === sessionId)
-      .slice(0, limit)
-      .map((message) => ({ ...message, id: String(message.id) }));
+  getMessages(sessionId, { limit = null } = {}) {
+    const all = this.data.messages.filter((message) => message.sessionId === sessionId);
+    const max = Number(limit) > 0 ? Math.floor(Number(limit)) : null;
+    const selected = max ? all.slice(Math.max(0, all.length - max)) : all;
+    return selected.map((message) => ({ ...message, id: String(message.id) }));
   }
 
   replaceMessages(sessionId, messages = []) {

@@ -1,4 +1,4 @@
-export const COMMANDS = ['doctor', 'keys', 'models', 'sessions', 'help', 'version'];
+export const COMMANDS = ['doctor', 'keys', 'providers', 'models', 'sessions', 'help', 'version'];
 
 export const USAGE = `MikuHost Agent — AI coding agent for the terminal
 
@@ -8,9 +8,11 @@ Usage:
   mikuhost --session <id>           Open a specific saved session
   mikuhost --workspace <path>       Start with a specific workspace directory
   mikuhost --model <id>             Start with a specific model
+  mikuhost --provider <id>          Start with a specific provider (use its stored key)
   mikuhost doctor                   Run environment diagnostics
   mikuhost doctor --keyboard        Inspect raw keyboard bytes (Backspace/Delete testing)
   mikuhost keys [list|add|remove|rename|test|use|switch]
+  mikuhost providers                List providers, base URLs and detected tokens
   mikuhost models                   List configured models
   mikuhost sessions                 List saved sessions
   mikuhost --help                   Show this help
@@ -20,22 +22,34 @@ Keyboard diagnosis:
   mikuhost doctor --keyboard     Shows raw bytes + normalized keys; Ctrl+C exits
 
 Keys management (non-interactive):
-  mikuhost keys add <name> <key>
+  mikuhost keys add <name> <key> [--provider <id>]
   mikuhost keys remove <id|name>
   mikuhost keys rename <id|name> <new name>
   mikuhost keys test [id|name]
   mikuhost keys use <id|name>        (alias: keys switch <id|name>)
 
+Providers (all OpenAI-compatible):
+  nvidia       NVIDIA NIM          NVIDIA_API_KEY       nvapi-… keys
+  tokenharbor  Token Harbor        TOKENHARBOR_API_KEY  thk_… keys
+  custom       Any base URL        MIKUHOST_API_KEY     any key
+
+  A token found in one of those variables is detected and used automatically;
+  the key prefix (nvapi-, thk_) also selects the provider when adding a key.
+
 Environment:
   MIKUHOST_WORKSPACE      Default workspace (overridden by --workspace)
   MIKUHOST_CONFIG_DIR     Config directory (default ~/.config/mikuhost)
-  MIKUHOST_BASE_URL       NVIDIA API base URL
+  MIKUHOST_BASE_URL       Global API base URL override
+  MIKUHOST_API_KEY        API key for a custom OpenAI-compatible endpoint
+  TOKENHARBOR_BASE_URL    Token Harbor base URL override
+  TOKENHARBOR_MODEL       Token Harbor model override
+  NVIDIA_BASE_URL         NVIDIA base URL override
   MIKUHOST_ENCRYPTION_KEY Passphrase used to encrypt credentials.json
   MIKUHOST_MOUSE=0        Disable mouse click support in the TUI
   NO_COLOR                Disable colours
 `;
 
-const VALUE_FLAGS = new Set(['workspace', 'model', 'base-url', 'session']);
+const VALUE_FLAGS = new Set(['workspace', 'model', 'base-url', 'session', 'provider']);
 
 export function parseArgs(argv = []) {
   const options = {};

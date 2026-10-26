@@ -41,17 +41,18 @@ import { ErrorDialog } from './components/error-dialog.mjs';
 import { SessionsPanel } from './panels/sessions.mjs';
 import { ModelsPanel } from './panels/models.mjs';
 import { KeysPanel } from './panels/keys.mjs';
-import { SettingsPanel } from './panels/settings.mjs';
+import { SettingsPanel, SETTINGS_ROW_KEYS } from './panels/settings.mjs';
 import { ProjectsPanel } from './panels/projects.mjs';
 import { SetupWizard } from './setup-wizard.mjs';
 import { CredentialManager } from '../credentials/manager.mjs';
+import { normalizeKeyInput } from '../credentials/storage.mjs';
 import { SessionManager } from '../sessions/manager.mjs';
 import { AgentRuntime } from '../core/agent.mjs';
 import { PHASES } from '../core/events.mjs';
-import { NvidiaProvider } from '../providers/nvidia.mjs';
-import { compactMessages } from '../core/context.mjs';
+import { createProvider, providerName, resolveProviderId } from '../providers/catalog.mjs';
+import { compactMessages, findUnfinishedTurn } from '../core/context.mjs';
 import { resolveWorkspaceRoot, Workspace, expandHome, isRootUser } from '../security/workspace.mjs';
-import { maskKey, titleFromPrompt } from '../util/text.mjs';
+import { maskKey, titleFromPrompt, truncate } from '../util/text.mjs';
 
 // Ask the terminal to wrap pasted text in ESC[200~ / ESC[201~ markers. Without
 // this, a supporting terminal never sends paste boundaries at all.
@@ -105,7 +106,13 @@ export function createEnvironment({
     session,
     isRoot: isRootUser(),
   });
-  return { session, runtime, workspace, sessionMissing: Boolean(sessionId && !restored) };
+  return {
+    session,
+    runtime,
+    workspace,
+    history: runtime.history,
+    sessionMissing: Boolean(sessionId && !restored),
+  };
 }
 
 function App({
@@ -153,7 +160,7 @@ function App({
   const [notice, setNotice] = useState(() =>
     initialEnv.sessionMissing
       ? { text: 'Requested session was not found. Started a new session.', tone: 'warning' }
-      : null,
+      : unfinishedTurnNotice(initialEnv.session.messages),
   );
   const [tokenTotal, setTokenTotal] = useState(0);
   const [scrollOffset, setScrollOffset] = useState(0);
@@ -207,6 +214,10 @@ function App({
   const pendingSendRef = useRef(null);
   const previousLineCountRef = useRef(0);
   const reasoningStreamRef = useRef({ buffer: '', timer: null, startedAt: 0 });
+  // Bracketed paste is published outside this render closure, so the focused
+  // prompt is read through a ref instead of a stale state value.
+  const promptRef = useRef(null);
+  promptRef.current = prompt;
 
   const addActivity = useCallback((text, meta = {}) => {
     if (!text) return;
@@ -535,10 +546,21 @@ function App({
 
   useEffect(() => {
     if (ready) return;
-    setReady(Boolean(config.get().setupComplete) && credentials.size > 0);
+    setReady(credentials.size > 0);
   }, [ready, config, credentials]);
 
   // ---- session / workspace actions -------------------------------------------
+
+  /** One-line heads-up when a saved conversation stops after a user message. */
+  function unfinishedTurnNotice(messages) {
+    const pending = findUnfinishedTurn(messages);
+    if (!pending) return null;
+    const preview = truncate(String(pending.content ?? '').replace(/\s+/g, ' ').trim(), 60);
+    return {
+      text: `The last turn did not finish${preview ? ` after "${preview}"` : ''}. Run /continue to resume it, or send a new message.`,
+      tone: 'warning',
+    };
+  }
 
   function syncFromSession({ keepScroll = false } = {}) {
     const current = envRef.current;
@@ -615,6 +637,7 @@ function App({
     setAttachments([]);
     resetComposerCards();
     setNewOutput(false);
+    setNotice(unfinishedTurnNotice(current.session.messages));
     addActivity(`Opened session "${opened.title}"`);
   }
 
@@ -708,13 +731,30 @@ function App({
     }
     pendingSendRef.current = null;
 
-    const current = envRef.current;
     setInput('');
     setCursor(0);
     if (text) {
       setHistory((previous) => (previous[previous.length - 1] === text ? previous : [...previous, text]).slice(-100));
     }
     setHistoryIndex(null);
+    return runTurn({ current: envRef.current, text, pastedAttachments });
+  }
+
+  /** Re-run a turn that stopped before any answer (SSH drop, crash, restart). */
+  function continueTurn() {
+    if (busyRef.current) {
+      setNotice({ text: 'A turn is already running. Press Ctrl+C to cancel it.', tone: 'warning' });
+      return;
+    }
+    const current = envRef.current;
+    if (!findUnfinishedTurn(current.session.messages)) {
+      setNotice({ text: 'No unfinished turn to continue.', tone: 'info' });
+      return;
+    }
+    return runTurn({ current, text: '', pastedAttachments: [], resume: true });
+  }
+
+  async function runTurn({ current, text, pastedAttachments, resume = false }) {
     setNotice(null);
     setActivities([]);
     setDraft({ content: '', typing: true });
@@ -723,7 +763,7 @@ function App({
     setNewOutput(false);
     setViewFromId(null);
     streamRef.current.buffer = '';
-    lastPromptRef.current = { text, attachments: pastedAttachments };
+    if (!resume) lastPromptRef.current = { text, attachments: pastedAttachments };
     // The request owns the content from here on; clearing the composer keeps it
     // responsive for new typing while the agent works.
     setAttachments([]);
@@ -736,10 +776,12 @@ function App({
     abortRef.current = controller;
 
     try {
-      const result = await current.runtime.send(text, {
-        signal: controller.signal,
-        attachments: pastedAttachments,
-      });
+      const result = resume
+        ? await current.runtime.continueTurn({ signal: controller.signal })
+        : await current.runtime.send(text, {
+            signal: controller.signal,
+            attachments: pastedAttachments,
+          });
       flushStream();
       syncFromSession();
       if (result.aborted) {
@@ -758,6 +800,9 @@ function App({
       } else if (error.code === 'ABORTED') {
         setPhase(PHASES.CANCELLED);
         setNotice({ text: 'Cancelled.', tone: 'warning' });
+      } else if (error.code === 'NOTHING_TO_CONTINUE') {
+        setPhase(PHASES.IDLE);
+        setNotice({ text: error.message, tone: 'info' });
       } else {
         setPhase(PHASES.ERROR);
         setErrorDialog({ error, canRetry: true, canChangeKey: true });
@@ -833,21 +878,54 @@ function App({
   // ---- slash commands -------------------------------------------------------
 
   function applyPermission(key, value) {
+    if (key === 'all') {
+      for (const field of ['shell', 'fileWrite', 'sensitiveRead']) {
+        config.setValue(`permissions.${field}`, value);
+      }
+      setPermissionsVersion((versionNumber) => versionNumber + 1);
+      setNotice({
+        text:
+          value === 'auto'
+            ? 'Unattended mode on — every tool call runs without asking. Commands execute with your OS user privileges; there is still no sandbox.'
+            : 'Unattended mode off — shell, file writes and sensitive reads ask again.',
+        tone: value === 'auto' ? 'warning' : 'info',
+      });
+      return;
+    }
     const path = key === 'shell' ? 'permissions.shell' : key === 'file' ? 'permissions.fileWrite' : 'permissions.sensitiveRead';
     config.setValue(path, value);
     setPermissionsVersion((versionNumber) => versionNumber + 1);
     setNotice({
-      text: `${path} = ${value}${key === 'shell' ? ' — guarded and destructive commands still require approval.' : ''}`,
-      tone: 'info',
+      text:
+        value === 'auto'
+          ? `${path} = auto — this policy no longer asks for approval.`
+          : `${path} = ${value}${key === 'shell' && value === 'allow' ? ' — guarded and destructive commands still require approval.' : ''}`,
+      tone: value === 'auto' ? 'warning' : 'info',
     });
   }
 
   function requestPermission(key, value) {
+    // Anything that stops approval prompts entirely has to be confirmed first.
+    if (value === 'auto') {
+      setPermissionWarning({ key, value });
+      return;
+    }
     if (key === 'shell' && value === 'allow' && config.get().permissions.shell !== 'allow') {
       setPermissionWarning({ key, value });
       return;
     }
     applyPermission(key, value);
+  }
+
+  /**
+   * Every model whose provider has a key. Selecting one switches the active
+   * credential to that provider (DeepSeek → TokenHarbor key, NVIDIA models →
+   * NVIDIA key), so the panel stays the single place to pick a model.
+   */
+  function modelsForPanel() {
+    const runtime = envRef.current.runtime;
+    const providers = new Set(credentials.providers());
+    return runtime.models.list().filter((model) => providers.has(resolveProviderId(model.provider)));
   }
 
   function statusText() {
@@ -859,8 +937,8 @@ function App({
       `Model       ${current.runtime.modelName()}`,
       `Workspace   ${current.workspace.root}${focus ? `  (focus: ${focus})` : ''}`,
       `Session     ${current.session.title}  ·  ${current.session.messages.length} messages`,
-      `Provider    NVIDIA · ${config.baseUrl}`,
-      `Key         ${activeKey ? `${activeKey.name} ${maskKey(activeKey.key)}` : 'none'}`,
+      `Provider    ${providerName(current.runtime.providerId)} (${current.runtime.providerId}) · ${config.baseUrlFor(current.runtime.providerId) || 'no base URL'}`,
+      `Key         ${activeKey ? `${activeKey.name} ${maskKey(activeKey.key)}${activeKey.source === 'env' ? ' (env)' : ''}` : 'none'}`,
       `Permissions shell=${permissions.shell} fileWrite=${permissions.fileWrite} sensitiveRead=${permissions.sensitiveRead}`,
       `Reasoning   ${reasoningSettings(config.get()).mode}`,
       `Paste       bracketed markers ${inputController?.bracketedReceived ? 'received' : 'not received (fallback batching, /paste for a hard boundary)'}`,
@@ -896,7 +974,10 @@ function App({
         try {
           const entry = envRef.current.runtime.models.resolve(args);
           envRef.current.runtime.setModel(entry.id);
-          setNotice({ text: `Model: ${entry.name} (${entry.id})`, tone: 'info' });
+          setNotice({
+            text: `Model: ${entry.name} (${entry.id}) · ${providerName(entry.provider)} key ${credentials.activeEntry()?.name ?? 'none'}`,
+            tone: 'info',
+          });
         } catch (error) {
           setNotice({ text: error.message, tone: 'error' });
         }
@@ -957,8 +1038,8 @@ function App({
       case 'permissions': {
         const key = String(argv[0] ?? '').toLowerCase();
         const value = String(argv[1] ?? '').toLowerCase();
-        if (!['shell', 'file', 'sensitive'].includes(key) || !['ask', 'allow'].includes(value)) {
-          setNotice({ text: 'Usage: /permissions <shell|file|sensitive> <ask|allow>', tone: 'error' });
+        if (!['shell', 'file', 'sensitive'].includes(key) || !['ask', 'allow', 'auto'].includes(value)) {
+          setNotice({ text: 'Usage: /permissions <shell|file|sensitive> <ask|allow|auto>  (auto = unattended, nothing is asked)', tone: 'error' });
           break;
         }
         requestPermission(key, value);
@@ -980,14 +1061,97 @@ function App({
       }
       case 'compact': {
         const current = envRef.current;
-        const result = compactMessages(current.session.messages, { threshold: 0, keepRecent: Math.min(12, current.session.messages.length) });
-        if (!result.compacted) {
+        const transcript = current.session.messages;
+        if (!transcript.length) {
           setNotice({ text: 'Nothing to compact yet.', tone: 'info' });
           break;
         }
-        current.session.replaceMessages(result.messages);
-        setMessages([...current.session.messages]);
-        setNotice({ text: `Compacted ${result.removed} messages into a local summary.`, tone: 'info' });
+        // Compaction is a view of the conversation built for each request; it
+        // never deletes transcript messages, so this reports instead of pruning.
+        const threshold = config.get().agent?.compactAfterMessages ?? 80;
+        const result = compactMessages(transcript, { threshold, keepRecent: 24 });
+        if (!result.compacted) {
+          setNotice({
+            text: `Context fits the window: ${transcript.length}/${threshold} messages are sent to the model in full.`,
+            tone: 'info',
+          });
+          break;
+        }
+        setNotice({
+          text: `Next request sends a local summary plus the last 24 messages (${result.removed} older messages summarized). All ${transcript.length} messages stay in the transcript and in the saved session.`,
+          tone: 'info',
+        });
+        break;
+      }
+      case 'continue':
+        continueTurn();
+        break;
+      case 'undo': {
+        if (busyRef.current) {
+          setNotice({ text: 'Cancel the running turn before undoing a file change.', tone: 'warning' });
+          break;
+        }
+        const current = envRef.current;
+        const mode = String(args).trim().toLowerCase();
+        if (mode === 'list') {
+          const entries = current.runtime.history.list({ sessionId: current.session.id, limit: 10 });
+          if (!entries.length) {
+            setNotice({ text: 'Nothing to undo in this session.', tone: 'info' });
+            break;
+          }
+          setNotice({
+            text: [
+              'Undo stack (newest first):',
+              ...entries.map((entry, index) => {
+                const time = new Date(entry.createdAt).toTimeString().slice(0, 8);
+                return `  ${index + 1}. ${entry.existed ? 'restore' : 'remove '} ${entry.relPath ?? entry.absolute}  · ${entry.tool} · ${time}`;
+              }),
+              '',
+              '/undo restores the newest one · /undo force ignores later manual changes',
+            ].join('\n'),
+            tone: 'info',
+          });
+          break;
+        }
+        const result = current.runtime.history.undo({
+          sessionId: current.session.id,
+          force: mode === 'force',
+        });
+        if (!result.ok) {
+          const entry = result.entry;
+          setNotice({
+            text:
+              result.reason === 'empty'
+                ? 'Nothing to undo in this session. Only files the agent changed here are tracked.'
+                : result.reason === 'changed'
+                  ? `${entry.relPath ?? entry.absolute} changed after the agent's edit — undo would overwrite your own changes. Run /undo force to restore the previous version anyway.`
+                  : result.reason === 'outside-workspace'
+                    ? 'Refused: the recorded path is outside the workspace.'
+                    : result.reason === 'missing-snapshot'
+                      ? `The saved copy of ${entry.relPath ?? entry.absolute} is missing, so it cannot be restored.`
+                      : `Could not undo ${entry?.relPath ?? 'that edit'} (${result.reason}).`,
+            tone: 'error',
+          });
+          break;
+        }
+        const entry = result.entry;
+        const rel = entry.relPath ?? entry.absolute;
+        // Keep the transcript honest: the undo belongs in the conversation the
+        // model sees next, not only in a transient notice.
+        current.session.appendMessage({
+          role: 'system',
+          content: result.removed
+            ? `Undo: removed ${rel} (it had been created by ${entry.tool}).`
+            : `Undo: restored ${rel} to the version from before ${entry.tool}.`,
+          meta: { undo: true },
+        });
+        syncFromSession();
+        setNotice({
+          text: result.removed
+            ? `Removed ${rel} — it was created by ${entry.tool} in this session.`
+            : `Restored ${rel} to the version before ${entry.tool}.`,
+          tone: 'info',
+        });
         break;
       }
       case 'rename':
@@ -1266,15 +1430,25 @@ function App({
       const value = prompt.value.trim();
       if (prompt.kind === 'key-add-name') {
         if (!value) return;
-        setPrompt({ kind: 'key-add-value', label: `API key for "${value}"`, value: '', cursor: 0, masked: true, name: value });
+        // Shown in clear: you cannot spot a swallowed/truncated character in a
+        // field full of bullets. The list view is still masked.
+        setPrompt({ kind: 'key-add-value', label: `API key for "${value}"`, value: '', cursor: 0, masked: false, name: value });
         return;
       }
       if (prompt.kind === 'key-add-value') {
         try {
           const added = credentials.add({ name: prompt.name, key: value, status: 'unverified' });
           credentials.setActive(added.id);
-          setKeysMessage(`Added ${added.name} (${added.masked}). Press T to verify it.`);
+          // Follow the new key to its provider so the next request is aimed at
+          // the service the token really belongs to.
+          const switched = envRef.current.runtime.useProvider(added.provider);
+          setKeysMessage(
+            `Added ${added.name} (${added.masked}, ${value.length} characters) · provider ${added.providerName} detected${switched ? ` · model ${switched.name}` : ''}. Verifying with a real completion…`,
+          );
           setPrompt(null);
+          // Verify with the same request the agent will send, not a catalogue
+          // listing that can succeed for a key chat rejects.
+          void verifyKey(added);
         } catch (error) {
           setKeysMessage(error.message);
         }
@@ -1295,28 +1469,78 @@ function App({
     }
   };
 
+  /**
+   * Verify one key the way it will be used: a real POST /chat/completions with
+   * the provider's model. A 429 waits for Retry-After and retries once, so a
+   * free-tier key is not marked dead after a momentary rate limit.
+   */
+  async function verifyKey(entry) {
+    if (!entry) return null;
+    const key = credentials.reveal(entry.id);
+    const providerId = resolveProviderId(entry.provider);
+    const model = entry.model || config.modelFor(providerId);
+    const label = `${entry.name} · ${providerName(providerId)}`;
+    setKeysMessage(`${label}: sending a real completion${model ? ` (${model})` : ''}…`);
+    try {
+      const provider = createProvider({
+        provider: providerId,
+        baseUrl: entry.baseUrl || config.baseUrlFor(providerId),
+        apiKey: key,
+      });
+      const result = await provider.validateKey(key, {
+        signal: AbortSignal.timeout(60_000),
+        model,
+        onWait: ({ waitMs, next }) => {
+          if (!mountedRef.current) return;
+          setKeysMessage(`${label}: rate limited · waiting ${Math.ceil(waitMs / 1000)}s before attempt ${next}…`);
+        },
+      });
+      if (!mountedRef.current) return result;
+      if (result.valid) {
+        credentials.setStatus(entry.id, 'ready');
+        setKeysMessage(
+          `${entry.name}: key accepted by ${providerName(providerId)}${model ? ` with ${model}` : ''} · ${result.models?.length ?? 0} models available${result.warning ? ` · ${result.warning}` : ''}.`,
+        );
+        return result;
+      }
+      if (result.blocked) {
+        // 403 from the provider: the key itself was accepted, the account
+        // behind it needs action (TokenHarbor email verification, model access).
+        credentials.setStatus(entry.id, 'blocked', result.error?.message);
+        setKeysMessage(
+          `${entry.name}: key accepted by ${providerName(providerId)}, but the account needs action · ${result.error?.message ?? 'restricted'}`,
+        );
+        return result;
+      }
+      if (result.rateLimited) {
+        credentials.setStatus(entry.id, 'rate_limited', result.error?.message);
+        const seconds = result.retryAfterMs ? Math.ceil(result.retryAfterMs / 1000) : null;
+        setKeysMessage(
+          `${entry.name}: still rate limited${seconds ? ` · retry in ${seconds}s` : ''}. The key was not rejected — press T again later.`,
+        );
+        return result;
+      }
+      if (result.offline) {
+        setKeysMessage(`${entry.name}: network unreachable, could not verify.`);
+        return result;
+      }
+      if (result.inconclusive) {
+        setKeysMessage(`${entry.name}: provider error, not a key rejection · ${result.error?.message ?? 'unknown'}`);
+        return result;
+      }
+      credentials.setStatus(entry.id, 'invalid', result.error?.message);
+      setKeysMessage(`${entry.name}: ${result.error?.message ?? 'invalid'}`);
+      return result;
+    } catch (error) {
+      setKeysMessage(`Test failed: ${error.message}`);
+      return null;
+    }
+  }
+
   async function testSelectedKey() {
     const keys = credentials.list();
     const entry = keys[Math.min(panelSelection, keys.length - 1)];
-    if (!entry) return;
-    const key = credentials.reveal(entry.id);
-    setKeysMessage(`Testing ${entry.name}…`);
-    try {
-      const provider = new NvidiaProvider({ baseUrl: config.baseUrl, apiKey: key });
-      const result = await provider.validateKey(key, { signal: AbortSignal.timeout(20_000) });
-      if (!mountedRef.current) return;
-      if (result.valid) {
-        credentials.setStatus(entry.id, 'ready');
-        setKeysMessage(`${entry.name}: valid · ${result.models.length} models available.`);
-      } else if (result.offline) {
-        setKeysMessage(`${entry.name}: network unreachable, could not verify.`);
-      } else {
-        credentials.setStatus(entry.id, 'invalid', result.error?.message);
-        setKeysMessage(`${entry.name}: ${result.error?.message ?? 'invalid'}`);
-      }
-    } catch (error) {
-      setKeysMessage(`Test failed: ${error.message}`);
-    }
+    await verifyKey(entry);
   }
 
   function currentSessionId() {
@@ -1412,6 +1636,27 @@ function App({
     setNewOutput(false);
   }
 
+  /**
+   * Bracketed paste for a focused panel prompt (add key, rename). The payload
+   * never reaches Ink, so without this it fell through to the hidden chat
+   * composer and an API key pasted into "Add key" was silently stored as a
+   * chat draft instead of in the key field.
+   */
+  function insertPromptText(content) {
+    const active = promptRef.current;
+    if (!active) return false;
+    const cleaned = active.masked
+      ? normalizeKeyInput(content)
+      : sanitizeForDisplay(content).replace(/\s+/g, ' ').trim();
+    if (!cleaned) return true;
+    setPrompt((current) => {
+      if (!current) return current;
+      const next = insertPlainText(current.value, current.cursor, cleaned);
+      return next.changed ? { ...current, value: next.value, cursor: next.cursor } : current;
+    });
+    return true;
+  }
+
   function commitPastedContent(content, { batched = false, force = false } = {}) {
     if (!mountedRef.current) return;
     const settings = pasteSettings(config.get());
@@ -1483,8 +1728,19 @@ function App({
       inputController?.injectText(content);
       return;
     }
+    // A focused prompt owns pasted text; the composer is disabled behind it.
+    if (insertPromptText(content)) return;
     if (pasteModeRef.current.active) {
       appendPasteCapture(content);
+      return;
+    }
+    // The composer is hidden behind a panel or dialog: committing the payload
+    // would file it somewhere the user cannot see (an API key pasted while the
+    // key panel was open used to end up as a chat draft).
+    if (panel || confirming || approval || errorDialog || permissionWarning) {
+      if (panel === 'keys') {
+        setKeysMessage('Press A to add a key, then paste into the name/key field.');
+      }
       return;
     }
     pasteBatchRef.current.flush();
@@ -1537,18 +1793,25 @@ function App({
   }
 
   async function refreshModels() {
-    setModelsMessage('Fetching model catalogue from NVIDIA…');
+    const entry = credentials.activeEntry();
+    const providerId = resolveProviderId(entry?.provider ?? config.providerId);
+    setModelsMessage(`Fetching model catalogue from ${providerName(providerId)}…`);
     try {
-      const entry = credentials.activeEntry();
       if (!entry) {
         setModelsMessage('No API key configured. Open /keys to add one.');
         return;
       }
-      const provider = new NvidiaProvider({ baseUrl: config.baseUrl, apiKey: entry.key });
+      const provider = createProvider({
+        provider: providerId,
+        baseUrl: entry.baseUrl || config.baseUrlFor(providerId),
+        apiKey: entry.key,
+      });
       const ids = await provider.listModels({ signal: AbortSignal.timeout(20_000) });
       if (!mountedRef.current) return;
-      envRef.current.runtime.models.applyCatalogue(ids);
-      setModelsMessage(`Catalogue checked: ${ids.length} models visible to this key.`);
+      envRef.current.runtime.models.applyCatalogue(ids, { provider: providerId });
+      setModelsMessage(
+        `Catalogue checked: ${ids.length} models visible to this ${providerName(providerId)} key.`,
+      );
     } catch (error) {
       if (!mountedRef.current) return;
       setModelsMessage(`Could not refresh: ${error.message}`);
@@ -1659,8 +1922,12 @@ function App({
           setSessions(current.session.list());
           setMessages([...current.session.messages]);
         } else if (confirming.kind === 'key-delete') {
-          credentials.remove(confirming.id);
-          setKeysMessage(`Deleted ${confirming.name}.`);
+          try {
+            credentials.remove(confirming.id);
+            setKeysMessage(`Deleted ${confirming.name}.`);
+          } catch (error) {
+            setKeysMessage(error.message);
+          }
         }
         setConfirming(null);
         setPanelSelection((value) => Math.max(0, value - 1));
@@ -1697,14 +1964,17 @@ function App({
       }
 
       if (panel === 'models') {
-        const all = envRef.current.runtime.models.list();
+        const all = modelsForPanel();
         if (key.upArrow) handleListMove(-1, all.length);
         else if (key.downArrow) handleListMove(1, all.length);
         else if (key.return && all.length) {
           const entry = all[Math.min(panelSelection, all.length - 1)];
           envRef.current.runtime.setModel(entry.id);
           setSessions(envRef.current.session.list());
-          setNotice({ text: `Model: ${entry.name}`, tone: 'info' });
+          setNotice({
+            text: `Model: ${entry.name} · ${providerName(entry.provider)} key ${credentials.activeEntry()?.name ?? 'none'}`,
+            tone: 'info',
+          });
           closePanel();
         } else if (inputChar.toLowerCase() === 'r') refreshModels();
         return;
@@ -1717,7 +1987,12 @@ function App({
         else if ((key.return || inputChar.toLowerCase() === 's') && all.length) {
           const target = all[Math.min(panelSelection, all.length - 1)];
           credentials.setActive(target.id);
-          setKeysMessage(`Active key: ${target.name} · used for the next request.`);
+          const switched = envRef.current.runtime.useProvider(target.provider);
+          setKeysMessage(
+            switched
+              ? `Active key: ${target.name} · ${providerName(target.provider)} · model ${switched.name} · used for the next request, then automatic selection resumes.`
+              : `Active key: ${target.name}, but ${providerName(target.provider)} has no known model. Add one in config.json → "models".`,
+          );
         } else if (inputChar.toLowerCase() === 'a') {
           setKeysMessage(null);
           setPrompt({ kind: 'key-add-name', label: 'Key name', value: '', cursor: 0, masked: false });
@@ -1740,13 +2015,21 @@ function App({
       }
 
       if (panel === 'settings') {
-        const rowsList = ['shell', 'fileWrite', 'sensitiveRead'];
+        const rowsList = SETTINGS_ROW_KEYS;
         if (key.upArrow) handleListMove(-1, rowsList.length);
         else if (key.downArrow) handleListMove(1, rowsList.length);
         else if (key.return) {
           const rowKey = rowsList[Math.min(panelSelection, rowsList.length - 1)];
-          const currentValue = config.get().permissions[rowKey] === 'allow' ? 'allow' : 'ask';
-          const nextValue = currentValue === 'allow' ? 'ask' : 'allow';
+          if (rowKey === 'unattended') {
+            // One switch for the whole point: leave the agent alone.
+            const on = ['shell', 'fileWrite', 'sensitiveRead'].every(
+              (field) => config.get().permissions[field] === 'auto',
+            );
+            requestPermission('all', on ? 'ask' : 'auto');
+            return;
+          }
+          const currentValue = config.get().permissions[rowKey];
+          const nextValue = currentValue === 'allow' ? 'auto' : currentValue === 'auto' ? 'ask' : 'allow';
           const permissionKey = rowKey === 'shell' ? 'shell' : rowKey === 'fileWrite' ? 'file' : 'sensitive';
           requestPermission(permissionKey, nextValue);
         }
@@ -1929,13 +2212,22 @@ function App({
     }
   });
 
+  const unattendedWarning = permissionWarning?.value === 'auto';
   const permissionConfirm = permissionWarning
     ? h(
         Box,
-        { borderStyle: 'round', borderColor: theme.yellow, flexDirection: 'column', paddingX: 1 },
-        h(Text, { color: theme.yellow, bold: true }, 'ENABLE ALWAYS ALLOW?'),
-        h(Text, { color: theme.text }, 'Read-only and project commands will run without approval.'),
-        h(Text, { color: theme.text }, 'Destructive, installer, network and opaque commands still ask.'),
+        { borderStyle: 'round', borderColor: unattendedWarning ? theme.red : theme.yellow, flexDirection: 'column', paddingX: 1 },
+        h(
+          Text,
+          { color: unattendedWarning ? theme.red : theme.yellow, bold: true },
+          unattendedWarning ? 'ENABLE UNATTENDED MODE?' : 'ENABLE ALWAYS ALLOW?',
+        ),
+        unattendedWarning
+          ? h(Text, { color: theme.text }, 'Shell commands of any risk (rm -rf, sudo, installers, network), file writes and sensitive reads will run without asking.')
+          : h(Text, { color: theme.text }, 'Read-only and project commands will run without approval.'),
+        unattendedWarning
+          ? h(Text, { color: theme.text }, 'You can keep working or walk away; Ctrl+C still cancels the current turn.')
+          : h(Text, { color: theme.text }, 'Destructive, installer, network and opaque commands still ask.'),
         isRootUser()
           ? h(Text, { color: theme.red }, 'Agent is running as root: auto-executed commands have full system privileges.')
           : null,
@@ -1971,6 +2263,7 @@ function App({
       h(Header, {
         model: dialogModel,
         workspace: dialogWorkspace,
+        provider: providerName(envRef.current.runtime.providerId),
         session: envRef.current.session.title,
         status: errorDialog ? 'ERROR' : busy ? phaseStatusLabel(phase) : 'READY',
         statusColor: errorDialog
@@ -1991,6 +2284,7 @@ function App({
       h(StatusBar, {
         model: dialogModel,
         workspace: dialogWorkspace,
+        provider: providerName(envRef.current.runtime.providerId),
         permission: config.get().permissions.shell,
         busy,
         frame,
@@ -2073,8 +2367,8 @@ function App({
       Box,
       { height: chatHeight, flexShrink: 0, paddingX: 1 },
       h(ModelsPanel, {
-        models: envRef.current.runtime.models.list(),
-        selected: Math.min(panelSelection, Math.max(0, envRef.current.runtime.models.list().length - 1)),
+        models: modelsForPanel(),
+        selected: Math.min(panelSelection, Math.max(0, modelsForPanel().length - 1)),
         activeId: envRef.current.runtime.activeModel,
         width: columns - 4,
         statusMessage: modelsMessage,
@@ -2100,10 +2394,10 @@ function App({
       { height: chatHeight, flexShrink: 0, paddingX: 1 },
       h(SettingsPanel, {
         permissions,
-        selected: Math.min(panelSelection, 2),
+        selected: Math.min(panelSelection, SETTINGS_ROW_KEYS.length - 1),
         width: columns - 4,
         rootWarning: isRootUser(),
-        confirming: permissionWarning ? true : null,
+        confirming: permissionWarning,
       }),
     );
   } else if (panel === 'projects') {
@@ -2186,6 +2480,7 @@ function App({
     h(StatusBar, {
       model: modelLabel,
       workspace: workspaceLabel,
+      provider: providerName(envRef.current.runtime.providerId),
       permission: permissions.shell,
       busy,
       frame,
@@ -2217,7 +2512,9 @@ export async function launchTui({
   sessionId = null,
 }) {
   const credentials = new CredentialManager();
-  const needsSetup = config.get().setupComplete !== true || credentials.size === 0;
+  // A token found in the environment is enough to start: the wizard is only
+  // needed when no credential exists at all.
+  const needsSetup = credentials.size === 0;
   const initialEnv = createEnvironment({
     config,
     credentials,

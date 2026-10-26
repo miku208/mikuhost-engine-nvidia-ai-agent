@@ -15,6 +15,19 @@ export { loadCredentialStore, saveCredentialStore, validateKeyFormat } from './c
 export { maskKey, redactSecrets } from './util/text.mjs';
 
 export { NvidiaProvider } from './providers/nvidia.mjs';
+export {
+  PROVIDERS,
+  DEFAULT_PROVIDER,
+  providerList,
+  providerIds,
+  getProvider,
+  resolveProviderId,
+  providerName,
+  detectProviderFromKey,
+  credentialsFromEnv,
+  detectedEnvProvider,
+  createProvider,
+} from './providers/catalog.mjs';
 export { ProviderError, ERROR_CODES, describeProviderError } from './providers/errors.mjs';
 export { ModelRegistry, BUILTIN_MODELS, prettifyModelId } from './models/registry.mjs';
 
@@ -30,7 +43,8 @@ export { validateSchema } from './tools/schema.mjs';
 
 export { AgentRuntime, AgentSetupError } from './core/agent.mjs';
 export { runAgentLoop, extractProtocolToolCalls } from './core/agent-loop.mjs';
-export { buildSystemPrompt, compactMessages, historyToApi } from './core/context.mjs';
+export { buildSystemPrompt, compactMessages, historyToApi, findUnfinishedTurn } from './core/context.mjs';
+export { FileHistory } from './history/file-history.mjs';
 export { createEmitter, EVENTS } from './core/events.mjs';
 
 export { scanProjects, findProject, readPackageSummary } from './projects/scanner.mjs';

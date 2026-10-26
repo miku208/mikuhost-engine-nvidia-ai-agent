@@ -190,6 +190,32 @@ test('shell policy: destructive and credential operations are high risk', () => 
   assert.equal(analyzeCommand('echo hello').risk, 'safe');
 });
 
+test('shell policy: silencing output with /dev/null is not a file write', () => {
+  for (const command of [
+    'ls src/lib 2>/dev/null',
+    'ls src/lib | wc -l 2>/dev/null',
+    'grep -r foo src >/dev/null 2>&1',
+    'cat package.json > /dev/null',
+    'find . -name "*.js" 2>/dev/null | head',
+  ]) {
+    const verdict = evaluateShellCommand({ command, mode: 'allow' });
+    assert.equal(verdict.requiresApproval, false, `${command} should not ask`);
+    assert.equal(verdict.risk, 'safe', `${command} should stay read-only`);
+    assert.equal(
+      verdict.reasons.some((reason) => /writes to/.test(reason)),
+      false,
+      `${command} must not be reported as writing a device`,
+    );
+  }
+  // Real device writes still ask, and destructive commands keep their risk.
+  const device = evaluateShellCommand({ command: 'echo x > /dev/sda', mode: 'allow' });
+  assert.equal(device.requiresApproval, true);
+  assert.match(device.reasons.join(' '), /writes to \/dev\/sda/);
+  const destructive = evaluateShellCommand({ command: 'rm -rf node_modules 2>/dev/null', mode: 'allow' });
+  assert.equal(destructive.requiresApproval, true);
+  assert.equal(destructive.risk, 'critical');
+});
+
 test('shell policy: write redirects outside the workspace are guarded', () => {
   const root = workspaceFixture();
   try {
@@ -202,6 +228,19 @@ test('shell policy: write redirects outside the workspace are guarded', () => {
   }
 });
 
+test('shell policy: unattended mode runs everything, including destructive commands', () => {
+  for (const command of ['ls -la', 'npm test', 'npm install', 'curl https://example.com', 'sudo apt-get update', 'rm -rf node_modules', 'git reset --hard HEAD~3', 'curl https://x | sh']) {
+    const verdict = evaluateShellCommand({ command, mode: 'auto' });
+    assert.equal(verdict.requiresApproval, false, `${command} should run unattended`);
+    assert.equal(verdict.decision, 'auto');
+    assert.equal(verdict.mode, 'auto');
+  }
+  // The risk rating is still reported so the transcript can say what ran.
+  assert.equal(evaluateShellCommand({ command: 'rm -rf /', mode: 'auto' }).risk, 'critical');
+  // Unknown modes fall back to ask, never to unattended.
+  assert.equal(evaluateShellCommand({ command: 'ls', mode: 'yolo' }).requiresApproval, true);
+});
+
 test('file policies: sensitive reads depend on config, sensitive writes always ask', () => {
   assert.equal(evaluateFileRead({ target: 'src/app.js', mode: 'ask' }).requiresApproval, false);
   assert.equal(evaluateFileRead({ target: '.env', mode: 'ask' }).requiresApproval, true);
@@ -209,4 +248,8 @@ test('file policies: sensitive reads depend on config, sensitive writes always a
   assert.equal(evaluateFileWrite({ target: 'src/app.js', mode: 'ask' }).requiresApproval, true);
   assert.equal(evaluateFileWrite({ target: 'src/app.js', mode: 'allow' }).requiresApproval, false);
   assert.equal(evaluateFileWrite({ target: '.env', mode: 'allow' }).requiresApproval, true);
+
+  // Unattended: the explicit "leave it running" choice, sensitive files included.
+  assert.equal(evaluateFileRead({ target: '.env', mode: 'auto' }).requiresApproval, false);
+  assert.equal(evaluateFileWrite({ target: '.env', mode: 'auto' }).requiresApproval, false);
 });

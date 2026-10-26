@@ -5,7 +5,7 @@ import { formatDuration } from '../../util/text.mjs';
 import { PHASES } from '../../core/events.mjs';
 
 const LABELS = {
-  [PHASES.CONNECTING]: 'Connecting to NVIDIA',
+  [PHASES.CONNECTING]: 'Connecting to provider',
   [PHASES.THINKING]: 'Thinking',
   [PHASES.TOOL_EXECUTION]: 'Working',
   [PHASES.WAITING_APPROVAL]: 'Waiting for approval',

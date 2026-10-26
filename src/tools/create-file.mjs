@@ -34,6 +34,7 @@ export const createFileTool = {
     });
 
     if (ctx.signal?.aborted) throw new ToolError('Operation cancelled.', 'ABORTED');
+    ctx.recordFileSnapshot?.({ absolute, tool: 'create_file', previous: null, next: content });
     fs.mkdirSync(path.dirname(absolute), { recursive: true, mode: 0o755 });
     fs.writeFileSync(absolute, content, { encoding: 'utf8', flag: 'wx' });
     const rel = relativeInside(ctx.workspace, absolute);

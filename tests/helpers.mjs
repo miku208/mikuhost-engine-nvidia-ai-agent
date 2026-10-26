@@ -94,7 +94,7 @@ export function makeConfigStub(overrides = {}) {
     ...overrides,
   };
   state.permissions = { shell: 'ask', fileWrite: 'ask', sensitiveRead: 'ask', ...(overrides.permissions ?? {}) };
-  state.agent = { maxIterations: 20, commandTimeoutMs: 5000, compactAfterMessages: 80, ...(overrides.agent ?? {}) };
+  state.agent = { maxIterations: 0, commandTimeoutMs: 5000, compactAfterMessages: 80, ...(overrides.agent ?? {}) };
   state.ui = { streaming: true, showActivity: true, mouse: false, ...(overrides.ui ?? {}) };
   return {
     state,

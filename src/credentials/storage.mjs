@@ -2,10 +2,14 @@ import fs from 'node:fs';
 import crypto from 'node:crypto';
 import { paths, ensureConfigDir } from '../config/paths.mjs';
 import { readJson, writeJsonAtomic } from '../util/atomic.mjs';
+import { detectProviderFromKey, getProvider, providerName, resolveProviderId } from '../providers/catalog.mjs';
 
 /**
  * Credential file format (plaintext):
- *   { version: 1, activeId: "k_ab12", keys: [{ id, name, key, createdAt, ... }] }
+ *   { version: 1, activeId: "k_ab12", keys: [{ id, name, key, provider, ... }] }
+ *
+ * `provider` records which service the key belongs to (nvidia, tokenharbor,
+ * custom). Old files without it are read as NVIDIA keys.
  *
  * If MIKUHOST_ENCRYPTION_KEY is set the whole document is wrapped in an
  * AES-256-GCM envelope keyed by scrypt(passphrase, random salt). The salt lives
@@ -105,13 +109,20 @@ export function normalizeStore(store) {
           id: typeof entry.id === 'string' && entry.id ? entry.id : `k_${index + 1}`,
           name: typeof entry.name === 'string' && entry.name ? entry.name : `Key ${index + 1}`,
           key: entry.key.trim(),
+          provider: entry.provider ? resolveProviderId(entry.provider) : detectProviderFromKey(entry.key) ?? resolveProviderId(null),
+          baseUrl: typeof entry.baseUrl === 'string' && entry.baseUrl ? entry.baseUrl.replace(/\/+$/, '') : null,
+          model: typeof entry.model === 'string' && entry.model ? entry.model : null,
+          source: 'stored',
           createdAt: Number(entry.createdAt) || Date.now(),
           lastUsedAt: Number(entry.lastUsedAt) || null,
-          status: ['ready', 'unverified', 'invalid', 'rate_limited'].includes(entry.status) ? entry.status : 'unverified',
+          status: ['ready', 'unverified', 'invalid', 'rate_limited', 'blocked'].includes(entry.status) ? entry.status : 'unverified',
           lastError: typeof entry.lastError === 'string' ? entry.lastError : null,
         }))
     : [];
-  const activeId = keys.some((k) => k.id === store.activeId) ? store.activeId : (keys[0]?.id ?? null);
+  // An env-provided credential is never written to disk, but it can stay
+  // active across saves.
+  const envActive = typeof store.activeId === 'string' && store.activeId.startsWith('env:');
+  const activeId = keys.some((k) => k.id === store.activeId) || envActive ? store.activeId : (keys[0]?.id ?? null);
   return { version: 1, activeId, keys };
 }
 
@@ -138,14 +149,31 @@ export function normalizeKeyInput(value) {
   return String(value ?? '').replace(/[\s\u0000-\u001f\u007f\u200b-\u200d\ufeff]/g, '');
 }
 
-/** Basic structural validation. Never logs the value. */
-export function validateKeyFormat(key) {
+/**
+ * Basic structural validation. Never logs the value.
+ *
+ * With `provider`, the prefix check is provider-specific; without it the
+ * provider is detected from the key itself and an unrecognised prefix only
+ * produces a warning (gateways and proxies often use their own format).
+ */
+export function validateKeyFormat(key, { provider = null } = {}) {
   const value = String(key ?? '').trim();
   if (!value) return { ok: false, reason: 'API key is empty.' };
   if (/\s/.test(value)) return { ok: false, reason: 'API key must not contain whitespace.' };
   if (value.length < 20) return { ok: false, reason: 'API key looks too short.' };
+  const id = provider ? resolveProviderId(provider) : detectProviderFromKey(value);
+  if (id) {
+    const known = getProvider(id);
+    const matches = (known?.keyPrefixes ?? []).some((prefix) => value.toLowerCase().startsWith(prefix));
+    return {
+      ok: true,
+      warning: matches
+        ? null
+        : `This key does not look like a ${providerName(id)} key${known?.keyPrefixes.length ? ` (expected ${known.keyPrefixes.join(' / ')})` : ''}.`,
+    };
+  }
   return {
     ok: true,
-    warning: value.startsWith('nvapi-') ? null : 'This key does not start with "nvapi-"; it may not be an NVIDIA API key.',
+    warning: 'This key does not match a known provider prefix; it will be stored for the active provider.',
   };
 }

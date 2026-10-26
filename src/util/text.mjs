@@ -6,7 +6,7 @@
  */
 export function maskKey(key) {
   if (typeof key !== 'string' || key.length === 0) return '(none)';
-  const prefixMatch = /^(nvapi-|sk-|key-)/i.exec(key);
+  const prefixMatch = /^(nvapi-|thk[_-]|sk-|key-)/i.exec(key);
   const prefix = prefixMatch ? prefixMatch[0] : '';
   const body = key.slice(prefix.length);
   const tail = body.length >= 8 ? body.slice(-4) : '';
@@ -20,6 +20,7 @@ export function maskTyped(value) {
 
 const SECRET_PATTERNS = [
   /\bnvapi-[A-Za-z0-9_-]{8,}\b/g,
+  /\bthk[_-][A-Za-z0-9_-]{8,}\b/g,
   /\bsk-[A-Za-z0-9_-]{16,}\b/g,
   /\b(?:ghp|gho|ghs|github_pat)_[A-Za-z0-9_]{16,}\b/g,
   /\bAIza[0-9A-Za-z_-]{20,}\b/g,

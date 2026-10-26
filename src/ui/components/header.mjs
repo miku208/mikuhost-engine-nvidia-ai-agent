@@ -11,7 +11,7 @@ function InfoRow({ label, value, color = theme.text }) {
   );
 }
 
-export function Header({ model, workspace, session, status, statusColor, compact, width }) {
+export function Header({ model, workspace, session, status, statusColor, compact, width, provider = 'Provider' }) {
   const dot = SYMBOLS.bullet;
   const twoColumns = width >= 80;
 
@@ -49,7 +49,7 @@ export function Header({ model, workspace, session, status, statusColor, compact
               Box,
               {},
               h(InfoRow, { label: 'Workspace', value: workspace }),
-              h(InfoRow, { label: 'Provider', value: 'NVIDIA' }),
+              h(InfoRow, { label: 'Provider', value: provider }),
             ),
           )
         : h(
@@ -58,7 +58,7 @@ export function Header({ model, workspace, session, status, statusColor, compact
             h(InfoRow, { label: 'Model', value: model, color: theme.green }),
             h(InfoRow, { label: 'Workspace', value: workspace }),
             h(InfoRow, { label: 'Session', value: session }),
-            h(InfoRow, { label: 'Provider', value: 'NVIDIA' }),
+            h(InfoRow, { label: 'Provider', value: provider }),
           ),
     h(Text, { color: theme.border }, '─'.repeat(Math.max(10, width))),
   );

@@ -5,7 +5,7 @@ import { createRequire } from 'node:module';
 import { paths, ensureConfigDir } from '../config/paths.mjs';
 import { ConfigManager } from '../config/manager.mjs';
 import { CredentialManager } from '../credentials/manager.mjs';
-import { NvidiaProvider } from '../providers/nvidia.mjs';
+import { createProvider, credentialsFromEnv, providerName, resolveProviderId } from '../providers/catalog.mjs';
 import { openSessionStore } from '../sessions/database.mjs';
 import { resolveWorkspaceRoot, isAccessible, isRootUser, Workspace } from '../security/workspace.mjs';
 import { formatBytes } from '../util/text.mjs';
@@ -100,39 +100,60 @@ export async function runDoctor({ cwd = process.cwd() } = {}) {
 
   let credentials = null;
   let activeKey = null;
+  let activeProvider = configManager?.providerId ?? 'nvidia';
+  let baseUrl = configManager?.baseUrlFor(activeProvider) ?? '';
   try {
     credentials = new CredentialManager();
     const active = credentials.activeEntry();
     activeKey = active?.key ?? null;
+    if (active) activeProvider = resolveProviderId(active.provider);
+    baseUrl = active?.baseUrl || configManager?.baseUrlFor(activeProvider) || '';
     const mode = dirPermissions(paths.credentials());
     if (credentials.size === 0) {
-      add('NVIDIA API keys', 'warn', 'none stored — run `mikuhost` for the setup wizard');
+      add(
+        'API keys',
+        'warn',
+        'none stored — run `mikuhost` for the setup wizard, or export NVIDIA_API_KEY / TOKENHARBOR_API_KEY',
+      );
     } else {
       add(
-        'NVIDIA API keys',
+        'API keys',
         'ok',
-        `${credentials.size} stored · active: ${active ? `${active.name} (${'•'.repeat(6)})` : 'none'} · mode ${mode ?? 'unknown'}`,
+        `${credentials.size} available · active: ${active ? `${active.name} (${'•'.repeat(6)})` : 'none'} · mode ${mode ?? 'unknown'}`,
       );
     }
+    const fromEnv = credentialsFromEnv(process.env);
+    add(
+      'Tokens from env',
+      fromEnv.length ? 'ok' : 'warn',
+      fromEnv.length
+        ? fromEnv.map((entry) => providerName(entry.provider)).join(', ')
+        : 'none detected (NVIDIA_API_KEY, TOKENHARBOR_API_KEY, MIKUHOST_API_KEY)',
+    );
   } catch (error) {
-    add('NVIDIA API keys', 'fail', error.message);
+    add('API keys', 'fail', error.message);
   }
 
-  const baseUrl = configManager?.baseUrl ?? 'https://integrate.api.nvidia.com/v1';
-  add('NVIDIA base URL', 'ok', baseUrl);
+  add('Active provider', 'ok', `${providerName(activeProvider)} (${activeProvider})`);
+  add('API base URL', baseUrl ? 'ok' : 'warn', baseUrl || 'not configured — set MIKUHOST_BASE_URL or providers.<id>.baseUrl');
 
   if (activeKey) {
-    const provider = new NvidiaProvider({ baseUrl, apiKey: activeKey, timeoutMs: 12_000 });
     try {
+      const provider = createProvider({
+        provider: activeProvider,
+        baseUrl,
+        apiKey: activeKey,
+        timeoutMs: 12_000,
+      });
       const models = await provider.listModels({ signal: AbortSignal.timeout(12_000) });
-      add('NVIDIA connectivity', 'ok', `reachable · ${models.length} models visible to this key`);
+      add('Provider connectivity', 'ok', `reachable · ${models.length} models visible to this key`);
     } catch (error) {
-      if (error.code === 'network') add('NVIDIA connectivity', 'fail', 'network unreachable or DNS failure');
-      else if (error.code === 'auth' || error.code === 'forbidden') add('NVIDIA connectivity', 'fail', `credential rejected (HTTP ${error.httpStatus})`);
-      else add('NVIDIA connectivity', 'warn', error.message.slice(0, 120));
+      if (error.code === 'network') add('Provider connectivity', 'fail', 'network unreachable or DNS failure');
+      else if (error.code === 'auth' || error.code === 'forbidden') add('Provider connectivity', 'fail', `credential rejected (HTTP ${error.httpStatus})`);
+      else add('Provider connectivity', 'warn', error.message.slice(0, 120));
     }
   } else {
-    add('NVIDIA connectivity', 'warn', 'skipped (no API key)');
+    add('Provider connectivity', 'warn', 'skipped (no API key)');
   }
 
   let workspaceInfo = null;
@@ -156,7 +177,15 @@ export async function runDoctor({ cwd = process.cwd() } = {}) {
   }
 
   const shellMode = configManager?.permissionMode ?? 'ask';
-  add('Shell permission', shellMode === 'ask' ? 'ok' : 'warn', shellMode === 'ask' ? 'Always Ask (default)' : 'Always Allow — guarded/high-risk commands still require approval');
+  add(
+    'Shell permission',
+    shellMode === 'ask' ? 'ok' : 'warn',
+    shellMode === 'ask'
+      ? 'Always Ask (default)'
+      : shellMode === 'auto'
+        ? 'Unattended — every command, file write and sensitive read runs without approval'
+        : 'Always Allow — guarded/high-risk commands still require approval',
+  );
   add('Running as', isRootUser() ? 'warn' : 'ok', isRootUser() ? 'root — the agent has full OS privileges; use a limited user for stronger isolation' : `uid ${process.getuid?.() ?? 'n/a'}`);
 
   try {

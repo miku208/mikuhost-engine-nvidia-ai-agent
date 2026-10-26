@@ -57,6 +57,30 @@ test('sessions: create, append, list, rename and delete', () => {
   }
 });
 
+test('sessions: a long conversation reloads in full, newest messages included', () => {
+  const dir = tempDir('mikuhost-long-');
+  try {
+    for (const { name, store } of stores(dir)) {
+      const session = store.createSession({ title: 'Long' });
+      for (let index = 0; index < 620; index += 1) {
+        store.appendMessage(session.id, { role: index % 2 ? 'assistant' : 'user', content: `m${index}` });
+      }
+
+      const all = store.getMessages(session.id);
+      assert.equal(all.length, 620, `${name}: every message is loaded`);
+      assert.equal(all[0].content, 'm0');
+      assert.equal(all.at(-1).content, 'm619', `${name}: the newest message is not dropped`);
+
+      const tail = store.getMessages(session.id, { limit: 5 });
+      assert.equal(tail.length, 5, name);
+      assert.deepEqual(tail.map((message) => message.content), ['m615', 'm616', 'm617', 'm618', 'm619']);
+      store.close();
+    }
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
 test('sessions: secrets and credential metadata are redacted before storage', () => {
   const dir = tempDir('mikuhost-redact-');
   try {

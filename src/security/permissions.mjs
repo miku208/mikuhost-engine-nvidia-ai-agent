@@ -8,6 +8,10 @@ import { classifySensitive, looksLikeSecretReference } from './sensitive-files.m
  * shell mode "ask"   -> every command needs approval.
  * shell mode "allow" -> commands classified as `safe` or `project` run
  *                       automatically; `guarded` and `critical` still ask.
+ * shell mode "auto"  -> unattended: every command runs, including guarded and
+ *                       critical ones. Explicitly chosen by the user (Settings →
+ *                       Unattended mode) so the agent can finish a task without
+ *                       anyone at the keyboard; it is not a sandbox.
  *
  * Risk classes:
  *   safe     - read-only inspection (ls, cat of non-secret files, git status, ...)
@@ -22,7 +26,7 @@ import { classifySensitive, looksLikeSecretReference } from './sensitive-files.m
  * real isolation.
  */
 
-export const SHELL_MODES = Object.freeze(['ask', 'allow']);
+export const SHELL_MODES = Object.freeze(['ask', 'allow', 'auto']);
 
 const RISK_ORDER = { safe: 0, project: 1, guarded: 2, critical: 3 };
 
@@ -67,6 +71,11 @@ const INTERPRETERS = new Set(['python', 'python3', 'node', 'deno', 'bun', 'ruby'
 const NETWORK_COMMANDS = new Set(['curl', 'wget', 'nc', 'ncat', 'netcat', 'ssh', 'scp', 'sftp', 'rsync', 'ftp', 'telnet', 'socat']);
 const INSTALLERS = new Set(['apt', 'apt-get', 'apk', 'yum', 'dnf', 'pacman', 'zypper', 'brew', 'snap', 'flatpak']);
 const DESTRUCTIVE_NAMES = new Set(['mkfs', 'mke2fs', 'dd', 'shutdown', 'reboot', 'poweroff', 'halt', 'init', 'telinit', 'wipefs', 'shred']);
+
+// Redirects people use to silence output. Writing to /dev/null discards the
+// data and reading it returns EOF, so neither is a filesystem side effect and
+// neither should turn an otherwise read-only command into "needs approval".
+const HARMLESS_REDIRECT_TARGETS = new Set(['/dev/null']);
 
 const WRAPPERS = new Set(['sudo', 'doas', 'command', 'time', 'nohup', 'nice', 'ionice', 'stdbuf', 'timeout', 'env', 'builtin']);
 
@@ -603,6 +612,7 @@ export function analyzeCommand(command, { workspaceRoot = null } = {}) {
   for (const redirect of redirects) {
     if (!redirect.target || ['>&', '<&'].includes(redirect.op)) continue;
     if (redirect.target.startsWith('/dev/')) {
+      if (HARMLESS_REDIRECT_TARGETS.has(path.normalize(redirect.target))) continue;
       if (redirect.op !== '<') bump(state, 'guarded', `writes to ${redirect.target}`);
       continue;
     }
@@ -625,11 +635,15 @@ export function analyzeCommand(command, { workspaceRoot = null } = {}) {
 
 export function evaluateShellCommand({ command, mode = 'ask', workspaceRoot = null } = {}) {
   const analysis = analyzeCommand(command, { workspaceRoot });
-  const allowMode = mode === 'allow';
-  const autoAllowed = allowMode && (analysis.risk === 'safe' || analysis.risk === 'project');
+  const resolved = SHELL_MODES.includes(mode) ? mode : 'ask';
+  // Unattended approves everything; allow mode approves safe/project only. The
+  // risk classification is still returned so the transcript keeps saying what
+  // ran, even when nobody was asked.
+  const autoAllowed =
+    resolved === 'auto' || (resolved === 'allow' && (analysis.risk === 'safe' || analysis.risk === 'project'));
   return {
     ...analysis,
-    mode: allowMode ? 'allow' : 'ask',
+    mode: resolved,
     decision: autoAllowed ? 'auto' : 'ask',
     requiresApproval: !autoAllowed,
   };
@@ -639,7 +653,7 @@ export function evaluateShellCommand({ command, mode = 'ask', workspaceRoot = nu
 export function evaluateFileRead({ target, mode = 'ask' } = {}) {
   const classification = classifySensitive(target);
   if (!classification.sensitive) return { decision: 'auto', requiresApproval: false, sensitive: false, reason: null };
-  if (mode === 'allow') {
+  if (mode === 'allow' || mode === 'auto') {
     return { decision: 'auto', requiresApproval: false, sensitive: true, reason: classification.reason };
   }
   return { decision: 'ask', requiresApproval: true, sensitive: true, reason: classification.reason };
@@ -648,6 +662,9 @@ export function evaluateFileRead({ target, mode = 'ask' } = {}) {
 /** Write policy: writes always need approval unless explicitly configured off. */
 export function evaluateFileWrite({ target, mode = 'ask' } = {}) {
   const classification = classifySensitive(target);
+  // Unattended mode is the explicit "leave it running" choice, so it covers
+  // credential files too; allow/ask keep protecting them.
+  if (mode === 'auto') return { decision: 'auto', requiresApproval: false, sensitive: classification.sensitive, reason: null };
   if (classification.sensitive) {
     // A shell "always allow" or fileWrite=allow setting must never silently
     // overwrite credential material.

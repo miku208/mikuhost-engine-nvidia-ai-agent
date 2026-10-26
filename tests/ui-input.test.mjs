@@ -7,7 +7,7 @@ import { PHASES } from '../src/core/events.mjs';
 import { parseSgrMouse } from '../src/ui/mouse.mjs';
 import { parseSlash, completeCommand, suggestCommands, HELP_TEXT } from '../src/ui/slash.mjs';
 import { buildChatLines, wrapText, displayWidth } from '../src/ui/text-layout.mjs';
-import { ModelRegistry, buildModelList, prettifyModelId } from '../src/models/registry.mjs';
+import { ModelRegistry, buildModelList, prettifyModelId, BUILTIN_MODELS } from '../src/models/registry.mjs';
 import { maskTyped } from '../src/util/text.mjs';
 
 const key = (overrides = {}) => ({
@@ -250,18 +250,23 @@ test('layout: wraps text and renders tool cards without raw output', () => {
 test('models: registry resolution by index, id, name and substring', () => {
   const registry = new ModelRegistry({ defaultModel: 'z-ai/glm-5.3-flash' });
   const list = registry.list();
-  assert.equal(list.length, 6);
+  assert.equal(list.length, BUILTIN_MODELS.length);
   assert.equal(registry.byIndex(1).id, 'z-ai/glm-5.3-flash');
   assert.equal(registry.byIndex(0), null);
-  assert.equal(registry.byIndex(6).id, 'deepseek-ai/deepseek-v4.1-flash');
-  assert.equal(registry.byIndex(7), null);
+  assert.equal(registry.byIndex(BUILTIN_MODELS.length).id, 'deepseek-v4.1-flash:free');
+  assert.equal(registry.byIndex(BUILTIN_MODELS.length + 1), null);
+  assert.equal(registry.byIndex(BUILTIN_MODELS.length).provider, 'tokenharbor');
+  assert.equal(list.filter((model) => model.provider === 'tokenharbor').length, 1);
+  // DeepSeek is served by Token Harbor only; no built-in NVIDIA DeepSeek entry.
+  assert.equal(list.some((model) => model.id === 'deepseek-ai/deepseek-v4.1-flash'), false);
+  assert.equal(registry.forProvider('nvidia').every((model) => model.provider === 'nvidia'), true);
   assert.equal(registry.resolve('2').id, 'nvidia/nemotron-3.5-super-vl-120b-a12b');
   assert.equal(registry.resolve('z-ai/glm-5.3-flash').name, 'GLM 5.3 Flash');
   assert.equal(registry.resolve('glm 5.3 flash').id, 'z-ai/glm-5.3-flash');
   assert.equal(registry.resolve('laguna').id, 'poolside/laguna-xs-2.1');
-  assert.equal(registry.resolve('deepseek v4.1 flash').id, 'deepseek-ai/deepseek-v4.1-flash');
-  assert.equal(registry.resolve('deepseek-ai/deepseek-v4.1-flash').name, 'DeepSeek V4.1 Flash');
-  assert.equal(registry.byId('deepseek-ai/deepseek-v4.1-flash').capabilities.tools, null);
+  assert.equal(registry.resolve('deepseek v4.1 flash').id, 'deepseek-v4.1-flash:free');
+  assert.equal(registry.resolve('deepseek-v4.1-flash:free').name, 'DeepSeek V4.1 Flash (free)');
+  assert.equal(registry.byId('deepseek-v4.1-flash:free').capabilities.tools, null);
   assert.throws(() => registry.resolve('nope'), /Unknown model/);
   assert.throws(() => registry.resolve(''), /required/);
   assert.throws(() => registry.resolve('a'), /ambiguous|Unknown/i);
@@ -269,7 +274,8 @@ test('models: registry resolution by index, id, name and substring', () => {
 
 test('models: user models merge, availability and capability honesty', () => {
   const list = buildModelList([{ id: 'custom/model', name: 'Custom' }, 'z-ai/glm-5.3-flash']);
-  assert.equal(list.length, 7);
+  assert.equal(list.length, BUILTIN_MODELS.length + 1);
+  assert.equal(list.find((model) => model.id === 'custom/model').provider, 'nvidia');
   assert.equal(list.find((model) => model.id === 'custom/model').source, 'config');
   assert.equal(list.find((model) => model.id === 'z-ai/glm-5.3-flash').capabilities.tools, null);
   assert.equal(prettifyModelId('nvidia/nemotron-3.5-super-vl-120b-a12b'), 'Nemotron 3.5 Super Vl 120b A12b');

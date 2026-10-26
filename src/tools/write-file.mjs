@@ -31,9 +31,11 @@ export const writeFileTool = {
 
     const exists = fs.existsSync(absolute);
     let diff = null;
+    let previousText = null;
     if (exists) {
       try {
         const { text: previous } = readTextFile(absolute, { maxBytes: ctx.limits.maxWriteBytes });
+        previousText = previous;
         diff = diffLines(previous, content, { context: 2 });
       } catch {
         diff = { text: '… existing file could not be read for diff (binary, too large or unreadable)', added: null, removed: null };
@@ -58,6 +60,10 @@ export const writeFileTool = {
     }
 
     if (ctx.signal?.aborted) throw new ToolError('Operation cancelled.', 'ABORTED');
+    // Only undoable when the previous version was readable (not binary/too large).
+    if (!exists || previousText !== null) {
+      ctx.recordFileSnapshot?.({ absolute, tool: 'write_file', previous: exists ? previousText : null, next: content });
+    }
     fs.writeFileSync(absolute, content, 'utf8');
     ctx.activity(`${exists ? 'Updated' : 'Created'} ${relativeInside(ctx.workspace, absolute)}`);
 

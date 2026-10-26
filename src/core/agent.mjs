@@ -1,9 +1,9 @@
-import { NvidiaProvider } from '../providers/nvidia.mjs';
 import { ProviderError, ERROR_CODES } from '../providers/errors.mjs';
+import { createProvider, providerName, resolveProviderId } from '../providers/catalog.mjs';
 import { ToolRegistry } from '../tools/registry.mjs';
 import { ModelRegistry } from '../models/registry.mjs';
 import { scanProjects, findProject } from '../projects/scanner.mjs';
-import { buildSystemPrompt, historyToApi, compactMessages } from './context.mjs';
+import { buildSystemPrompt, historyToApi, compactMessages, findUnfinishedTurn } from './context.mjs';
 import { runAgentLoop } from './agent-loop.mjs';
 import { PHASES } from './events.mjs';
 import { isRootUser } from '../security/workspace.mjs';
@@ -11,6 +11,7 @@ import { classifySensitive } from '../security/sensitive-files.mjs';
 import { redactSecrets } from '../util/text.mjs';
 import { attachmentMeta, composePromptWithAttachments } from '../paste/attachments.mjs';
 import { reasoningSettings } from '../reasoning/parser.mjs';
+import { FileHistory } from '../history/file-history.mjs';
 
 export class AgentSetupError extends Error {
   constructor(message, code = 'SETUP_REQUIRED') {
@@ -30,8 +31,11 @@ export class AgentRuntime {
     approvalHandler = null,
     onEvent = () => {},
     isRoot = null,
+    history = null,
   } = {}) {
     this.config = config;
+    // Pre-edit snapshots for /undo, shared with the UI through the environment.
+    this.history = history ?? new FileHistory();
     this.workspace = workspace;
     this.credentials = credentials;
     this.session = session;
@@ -46,6 +50,8 @@ export class AgentRuntime {
     this.projectScan = null;
     /** Model id -> detected tool mode ('native' | 'fallback' | 'chat'). */
     this.toolModes = new Map();
+    /** Session id whose compaction was already announced, so it warns once. */
+    this.compactionNoticeFor = null;
   }
 
   setApprovalHandler(handler) {
@@ -64,21 +70,73 @@ export class AgentRuntime {
     }
   }
 
+  /** Whether at least one usable key exists for a provider. */
+  providerHasKey(providerId) {
+    const credentials = this.credentials;
+    if (!credentials) return false;
+    const id = resolveProviderId(providerId);
+    if (typeof credentials.providers === 'function') return credentials.providers().includes(id);
+    const active = credentials.activeEntry?.();
+    if (!active) return false;
+    return resolveProviderId(credentials.activeProvider ?? active.provider ?? id) === id;
+  }
+
+  /**
+   * Model chosen for the next request: the session model, then the configured
+   * default. A model whose provider has no key is ignored, so a session saved
+   * under one service still works after switching to another service's key.
+   */
+  currentModelEntry() {
+    const candidates = [this.session?.session?.model, this.config?.get?.().defaultModel];
+    for (const candidate of candidates) {
+      const entry = this.models.byId(candidate);
+      if (entry && this.providerHasKey(entry.provider)) return entry;
+    }
+    return null;
+  }
+
+  /** Provider that serves the selected model; the active key is only a fallback. */
+  get providerId() {
+    const entry = this.currentModelEntry();
+    if (entry) return resolveProviderId(entry.provider);
+    return this.credentials?.activeProvider ?? resolveProviderId(this.config?.get?.().provider);
+  }
+
+  get providerName() {
+    return providerName(this.providerId);
+  }
+
+  /** Model used for the next request. */
   get activeModel() {
-    const sessionModel = this.session?.session?.model;
-    const configured = this.config?.get?.().defaultModel;
-    return sessionModel || configured || this.models.defaultModel;
+    return this.currentModelEntry()?.id ?? this.models.defaultFor(this.providerId)?.id ?? null;
   }
 
   modelName(id = this.activeModel) {
     return this.models.displayName(id);
   }
 
+  /**
+   * Key for this request. It is validated against the model's provider, and a
+   * random one is used when that provider has several eligible keys.
+   */
+  credentialFor(providerId = this.providerId) {
+    const picked =
+      this.credentials?.pickForProvider?.(providerId) ?? this.credentials?.activeEntry?.() ?? null;
+    if (!picked) {
+      throw new AgentSetupError(
+        `No API key for ${providerName(providerId)}. Add one with /keys, or export NVIDIA_API_KEY / TOKENHARBOR_API_KEY.`,
+        'NO_CREDENTIALS',
+      );
+    }
+    this.credentials?.markUsed?.(picked.id);
+    return picked;
+  }
+
   requireCredential() {
     const entry = this.credentials?.activeEntry?.();
     if (!entry) {
       throw new AgentSetupError(
-        'No NVIDIA API key configured. Run `mikuhost` to complete first-time setup, or add a key with `/keys`.',
+        'No API key configured. Run `mikuhost` to complete first-time setup, add a key with `/keys`, or export NVIDIA_API_KEY / TOKENHARBOR_API_KEY.',
         'NO_CREDENTIALS',
       );
     }
@@ -87,8 +145,14 @@ export class AgentRuntime {
 
   providerFor(entry) {
     if (this.providerFactory) return this.providerFactory(entry);
-    return new NvidiaProvider({
-      baseUrl: this.config.baseUrl,
+    // The key prefix decides the provider, so a mislabelled key still reaches
+    // the service it really belongs to.
+    const id = this.credentials?.providerOf?.(entry) ?? resolveProviderId(entry.provider);
+    const baseUrl =
+      entry.baseUrl || this.config?.baseUrlFor?.(id) || this.config?.baseUrl || null;
+    return createProvider({
+      provider: id,
+      baseUrl,
       apiKey: entry.key,
       timeoutMs: 180_000,
     });
@@ -140,10 +204,44 @@ export class AgentRuntime {
   setModel(id) {
     const entry = this.models.byId(id);
     if (!entry) throw new AgentSetupError(`Unknown model: ${id}`, 'MODEL_NOT_FOUND');
+    const modelProvider = resolveProviderId(entry.provider);
+    if (modelProvider !== this.providerId) {
+      // The key follows the model: picking a TokenHarbor model switches to the
+      // TokenHarbor credential, and an NVIDIA model switches back, so the two
+      // are never mixed up. The key itself is validated for that provider.
+      const credential =
+        this.credentials?.pickForProvider?.(modelProvider) ??
+        this.credentials?.firstForProvider?.(modelProvider);
+      if (!credential) {
+        throw new AgentSetupError(
+          `${entry.name} is served by ${providerName(modelProvider)}, but no ${providerName(modelProvider)} key is stored. Add one with /keys first.`,
+          'PROVIDER_MISMATCH',
+        );
+      }
+      this.credentials.setActive(credential.id);
+    }
+    this.config.setValue('provider', modelProvider);
     this.config.setValue('defaultModel', entry.id);
+    this.config.setValue(`providers.${modelProvider}.defaultModel`, entry.id);
     this.session?.setModel?.(entry.id);
     this.emit({ type: 'status', message: `Model set to ${entry.name}` });
     return entry;
+  }
+
+  /**
+   * Point the runtime at a provider's default model without choosing a key;
+   * the keys panel uses this after the user picks a key.
+   */
+  useProvider(providerId) {
+    const id = resolveProviderId(providerId);
+    this.config.setValue('provider', id);
+    const model = this.models.defaultFor(id);
+    if (!model) return null;
+    this.config.setValue('defaultModel', model.id);
+    this.config.setValue(`providers.${id}.defaultModel`, model.id);
+    this.session?.setModel?.(model.id);
+    this.emit({ type: 'status', message: `Provider set to ${providerName(id)} · ${model.name}` });
+    return model;
   }
 
   detectedToolMode(modelId) {
@@ -164,6 +262,7 @@ export class AgentRuntime {
       config: this.config,
       isRootUser: this.isRoot,
       session: this.session,
+      history: this.history,
       requestApproval: async (request) => {
         if (!this.approvalHandler) {
           this.emit({ type: 'warning', message: 'Approval required but no interactive handler is available.' });
@@ -186,12 +285,50 @@ export class AgentRuntime {
   }
 
   async send(prompt, { signal = null, attachments = [] } = {}) {
-    const startedAt = Date.now();
-    const entry = this.requireCredential();
     const pasted = Array.isArray(attachments) ? attachments.filter((attachment) => attachment?.content) : [];
     const displayPrompt = String(prompt ?? '').trim() || (pasted.length ? 'Pasted text' : '');
-    const modelPrompt = composePromptWithAttachments(displayPrompt, pasted);
+    return this.#runTurn({
+      displayPrompt,
+      modelPrompt: composePromptWithAttachments(displayPrompt, pasted),
+      pasted,
+      signal,
+      resume: false,
+      startedAt: Date.now(),
+    });
+  }
+
+  /**
+   * Re-run a turn that never received an answer (SSH drop, crash, Ctrl+C
+   * before the first token). The pending user message is already in the
+   * transcript, so it is sent as history instead of being appended twice.
+   */
+  async continueTurn({ signal = null } = {}) {
+    const pending = findUnfinishedTurn(this.session?.messages ?? []);
+    if (!pending) {
+      throw new AgentSetupError('There is no unfinished turn to continue.', 'NOTHING_TO_CONTINUE');
+    }
+    return this.#runTurn({
+      displayPrompt: null,
+      modelPrompt: null,
+      pasted: [],
+      signal,
+      resume: true,
+      startedAt: Date.now(),
+    });
+  }
+
+  async #runTurn({ displayPrompt, modelPrompt, pasted, signal, resume, startedAt }) {
     const model = this.activeModel;
+    if (!model) {
+      throw new AgentSetupError(
+        `No model configured for ${this.providerName}. Choose one with /model, or add a model id to config.json → "models" with "provider": "${this.providerId}".`,
+        'NO_MODEL',
+      );
+    }
+    // The key is chosen for the model's provider, never for whatever key was
+    // last selected: with several eligible keys one is picked at random.
+    const entry = this.credentialFor(this.providerId);
+    const providerId = this.credentials?.providerOf?.(entry) ?? this.providerId;
     const provider = this.providerFor(entry);
     const registry = this.buildRegistry({ signal });
 
@@ -201,24 +338,31 @@ export class AgentRuntime {
       project: this.session.session?.project ?? null,
     });
 
+    // Compaction shapes only what the model receives. The stored transcript is
+    // append-only, so scrolling back or reopening the session keeps everything.
     const compactionThreshold = this.config?.get?.().agent?.compactAfterMessages ?? 80;
-    if (this.session.messages.length > compactionThreshold) {
-      const compacted = compactMessages(this.session.messages, { threshold: compactionThreshold, keepRecent: 24 });
-      if (compacted.compacted) {
-        this.session.replaceMessages(compacted.messages);
-        this.emit({
-          type: 'warning',
-          message: `Context compacted: ${compacted.removed} older messages replaced by a local summary.`,
-        });
-      }
+    const compaction = compactMessages(this.session.messages, {
+      threshold: compactionThreshold,
+      keepRecent: 24,
+    });
+    const contextHistory = compaction.compacted ? compaction.messages : this.session.messages;
+    if (compaction.compacted && this.compactionNoticeFor !== this.session.id) {
+      this.compactionNoticeFor = this.session.id;
+      this.emit({
+        type: 'warning',
+        message: `Context compacted: ${compaction.removed} older messages are summarized for the model. The transcript and saved session keep every message.`,
+      });
     }
 
-    const userStored = this.session.appendMessage({
-      role: 'user',
-      content: displayPrompt,
-      meta: pasted.length ? { attachments: pasted.map(attachmentMeta) } : null,
-    });
-    if (this.session.session?.model !== model) this.session.setModel(model);
+    let userStored = null;
+    if (!resume) {
+      userStored = this.session.appendMessage({
+        role: 'user',
+        content: displayPrompt,
+        meta: pasted.length ? { attachments: pasted.map(attachmentMeta) } : null,
+      });
+      if (this.session.session?.model !== model) this.session.setModel(model);
+    }
 
     const scan = this.scanProjects();
     const focus = this.workspace.focusedPath;
@@ -235,21 +379,27 @@ export class AgentRuntime {
       shellMode: this.permissionModes.shell,
     });
 
-    const history = this.session.messages
-      .filter((message) => message.id !== userStored.id)
-      .map((message) => ({ ...message }));
-    const requestMessages = [
-      { role: 'system', content: systemPrompt },
-      ...historyToApi(history),
-      { role: 'user', content: modelPrompt },
-    ];
+    // A resumed turn already has its user message in the transcript; sending it
+    // again would duplicate the prompt in the model's view.
+    const history = resume
+      ? contextHistory.map((message) => ({ ...message }))
+      : contextHistory
+          .filter((message) => message.id !== userStored.id)
+          .map((message) => ({ ...message }));
+    const requestMessages = resume
+      ? [{ role: 'system', content: systemPrompt }, ...historyToApi(history)]
+      : [
+          { role: 'system', content: systemPrompt },
+          ...historyToApi(history),
+          { role: 'user', content: modelPrompt },
+        ];
 
     this.emit({ type: 'phase', phase: PHASES.CONNECTING });
-    this.emit({ type: 'status', message: `Connecting to NVIDIA (${this.modelName(model)})` });
+    this.emit({ type: 'status', message: `Connecting to ${providerName(providerId)} (${this.modelName(model)})` });
     this.emit({ type: 'start', model, modelName: this.modelName(model) });
 
     const reasoning = reasoningSettings(this.config?.get?.() ?? {});
-    const reasoningParams = this.config?.get?.().providers?.nvidia?.reasoningParams?.[model] ?? null;
+    const reasoningParams = this.config?.get?.().providers?.[this.providerId]?.reasoningParams?.[model] ?? null;
 
     let loop;
     try {
@@ -259,7 +409,7 @@ export class AgentRuntime {
         messages: requestMessages,
         tools: registry.definitions(),
         executeTool: (name, input, opts) => registry.execute(name, input, opts),
-        maxIterations: this.config?.get?.().agent?.maxIterations ?? 20,
+        maxIterations: this.config?.get?.().agent?.maxIterations ?? 0,
         onEvent: (event) => this.emit(event),
         signal,
         streaming: this.config?.get?.().ui?.streaming !== false,
@@ -276,19 +426,25 @@ export class AgentRuntime {
         phase: error?.code === ERROR_CODES.ABORTED || signal?.aborted ? PHASES.CANCELLED : PHASES.ERROR,
       });
       if (error?.httpStatus) {
-        this.credentials.reportFailure(entry.id, error.httpStatus);
+        this.credentials.reportFailure(entry.id, error.httpStatus, error.message);
       }
       if (error?.code === ERROR_CODES.INVALID_MODEL) {
         this.models.markUnavailable(model, error.message);
-        this.emit({ type: 'warning', message: `Model unavailable for current NVIDIA credential: ${this.modelName(model)}` });
+        this.emit({ type: 'warning', message: `Model unavailable for the current ${providerName(providerId)} key: ${this.modelName(model)}` });
       }
       throw error;
     }
 
     this.credentials.touch(entry.id);
-    if (loop.error?.httpStatus) this.credentials.reportFailure(entry.id, loop.error.httpStatus);
-    if (loop.error?.code === ERROR_CODES.AUTH || loop.error?.code === ERROR_CODES.FORBIDDEN) {
-      this.credentials.reportFailure(entry.id, loop.error.httpStatus);
+    if (loop.error?.httpStatus) {
+      this.credentials.reportFailure(entry.id, loop.error.httpStatus, loop.error.message);
+    }
+    if (
+      loop.error?.code === ERROR_CODES.AUTH ||
+      loop.error?.code === ERROR_CODES.FORBIDDEN ||
+      loop.error?.code === ERROR_CODES.ACCOUNT
+    ) {
+      this.credentials.reportFailure(entry.id, loop.error.httpStatus, loop.error.message);
     }
 
     this.rememberToolMode(model, loop.toolMode);

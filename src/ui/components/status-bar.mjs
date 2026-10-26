@@ -7,6 +7,7 @@ import { phaseStatusLabel } from './activity.mjs';
 export function StatusBar({
   model,
   workspace,
+  provider = 'Provider',
   permission,
   busy,
   frame,
@@ -36,7 +37,7 @@ export function StatusBar({
 
   const left = busy
     ? `${frame} ${phaseStatusLabel(phase)} ${formatDuration(elapsedMs)}${lastActivity ? ` · ${lastActivity}` : ''}`
-    : `${model} · ${workspace} · NVIDIA · ${permissionLabel}`;
+    : `${model} · ${workspace} · ${provider} · ${permissionLabel}`;
   const right = newOutput ? '↓ New output' : busy ? 'Ctrl+C cancel' : panel ? 'Esc close' : 'Ctrl+N new';
 
   const hints = (() => {

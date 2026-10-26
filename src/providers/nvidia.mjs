@@ -83,7 +83,7 @@ async function* parseSSE(body) {
 
 export class NvidiaProvider {
   constructor({ baseUrl, apiKey, timeoutMs = DEFAULT_TIMEOUT_MS, fetchImpl = globalThis.fetch, maxAttempts = 2 } = {}) {
-    if (!baseUrl) throw new ProviderError('NVIDIA base URL is not configured.', { code: ERROR_CODES.BAD_REQUEST });
+    if (!baseUrl) throw new ProviderError('API base URL is not configured for this provider.', { code: ERROR_CODES.BAD_REQUEST });
     this.baseUrl = String(baseUrl).replace(/\/+$/, '');
     this.apiKey = apiKey ?? null;
     this.timeoutMs = timeoutMs;
@@ -145,16 +145,125 @@ export class NvidiaProvider {
   }
 
   /**
-   * Validate a key without leaking it. Returns a structured result instead of
-   * throwing so the setup wizard can offer Retry / Replace / Exit.
+   * Real completion used to verify a credential, exactly like the manual curl:
+   * POST /chat/completions with `Authorization: Bearer <key>`. A catalogue call
+   * is not proof of a working key: some gateways list models without checking
+   * the credential, and a key can be accepted by /models but rejected for chat.
+   *
+   * A 429 waits for Retry-After (capped) and tries again, because free tiers
+   * rate-limit quickly. The key never appears in the returned value.
    */
-  async validateKey(key, { signal, timeoutMs = 20_000 } = {}) {
+  async probeChat({ key = this.apiKey, model, signal = null, timeoutMs = 30_000, attempts = 2, onWait = null } = {}) {
     const probe = new NvidiaProvider({
       baseUrl: this.baseUrl,
       apiKey: key,
       fetchImpl: this.fetchImpl,
       timeoutMs,
     });
+    const body = {
+      model,
+      messages: [{ role: 'user', content: 'ping' }],
+      max_tokens: 1,
+      temperature: 0,
+      stream: false,
+    };
+    const tries = Math.max(1, Math.min(3, attempts));
+    let lastError = null;
+
+    for (let attempt = 1; attempt <= tries; attempt += 1) {
+      let response;
+      try {
+        ({ response } = await probe.request('/chat/completions', {
+          method: 'POST',
+          body,
+          signal,
+          timeoutMs,
+        }));
+      } catch (error) {
+        if (error.code === ERROR_CODES.NETWORK) return { valid: false, offline: true, error };
+        return { valid: false, offline: false, inconclusive: true, error };
+      }
+
+      if (response.ok) {
+        // Drain the body so the socket is reusable; the answer itself is not used.
+        await response.text().catch(() => '');
+        return { valid: true, offline: false, model, attempts: attempt };
+      }
+
+      const error = await probe.readErrorResponse(response);
+      lastError = error;
+      if (error.code === ERROR_CODES.INVALID_MODEL) {
+        // The credential authenticated; only the model id is wrong.
+        return {
+          valid: true,
+          offline: false,
+          model,
+          warning: `${model} is not available for this key.`,
+          error,
+        };
+      }
+      if (error.code === ERROR_CODES.RATE_LIMIT) {
+        if (attempt < tries && !signal?.aborted) {
+          const waitMs = Math.min(error.retryAfterMs ?? 2000 * attempt, 15_000);
+          onWait?.({ waitMs, attempt, next: attempt + 1 });
+          try {
+            await delay(waitMs, signal);
+          } catch {
+            /* cancelled while waiting */
+          }
+          if (signal?.aborted) return { valid: false, offline: false, inconclusive: true, error };
+          continue;
+        }
+        return {
+          valid: false,
+          offline: false,
+          rateLimited: true,
+          retryAfterMs: error.retryAfterMs ?? null,
+          error,
+        };
+      }
+      if (error.code === ERROR_CODES.ACCOUNT) {
+        // 403 + a provider account code: the key authenticated, the account is
+        // what needs action (e.g. TokenHarbor email verification).
+        return { valid: false, offline: false, blocked: true, accountBlocked: true, error };
+      }
+      if (error.code === ERROR_CODES.AUTH) {
+        return { valid: false, offline: false, error };
+      }
+      if (error.code === ERROR_CODES.FORBIDDEN) {
+        // Authenticated but not allowed: do not call the key invalid either.
+        return { valid: false, offline: false, blocked: true, error };
+      }
+      return { valid: false, offline: false, inconclusive: true, error };
+    }
+
+    return { valid: false, offline: false, inconclusive: true, error: lastError };
+  }
+
+  /**
+   * Validate a key without leaking it. With a model, this performs the real
+   * chat request and also reports the catalogue size; without one (a provider
+   * with no configured model) it falls back to GET /models.
+   *
+   * Returns a structured result instead of throwing so the setup wizard can
+   * offer Retry / Replace / Exit.
+   */
+  async validateKey(key, { signal, model = null, timeoutMs = 30_000, attempts = 2, onWait = null } = {}) {
+    const probe = new NvidiaProvider({
+      baseUrl: this.baseUrl,
+      apiKey: key,
+      fetchImpl: this.fetchImpl,
+      timeoutMs,
+    });
+
+    if (model) {
+      const result = await probe.probeChat({ key, model, signal, timeoutMs, attempts, onWait });
+      if (!result.valid) return result;
+      // The chat request is the proof; the catalogue only adds the model count.
+      const models = await probe.listModels({ signal }).catch(() => null);
+      return { ...result, models: Array.isArray(models) ? models : [] };
+    }
+
     try {
       const models = await probe.listModels({ signal });
       return { valid: true, offline: false, models };
@@ -162,8 +271,14 @@ export class NvidiaProvider {
       if (error.code === ERROR_CODES.NETWORK) {
         return { valid: false, offline: true, error };
       }
-      if (error.code === ERROR_CODES.AUTH || error.code === ERROR_CODES.FORBIDDEN) {
+      if (error.code === ERROR_CODES.ACCOUNT) {
+        return { valid: false, offline: false, blocked: true, accountBlocked: true, error };
+      }
+      if (error.code === ERROR_CODES.AUTH) {
         return { valid: false, offline: false, error };
+      }
+      if (error.code === ERROR_CODES.FORBIDDEN) {
+        return { valid: false, offline: false, blocked: true, error };
       }
       // Reachable but e.g. 5xx: do not claim the key is valid, do not claim it
       // is invalid either.

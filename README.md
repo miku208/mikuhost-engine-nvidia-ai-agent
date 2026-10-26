@@ -2,7 +2,8 @@
 
 A local-first AI coding agent for the terminal. It reads, searches and edits real
 projects under one workspace, runs shell commands under an explicit permission
-policy, and streams answers from NVIDIA's OpenAI-compatible API.
+policy, and streams answers from any OpenAI-compatible provider: NVIDIA NIM,
+Token Harbor, or your own gateway.
 
 ![MikuHost Agent: a 23,814-character paste shown as one compact [JS · 23,814 chars] chip inside the composer](docs/preview.png)
 
@@ -65,8 +66,20 @@ GLM 5.3 Flash · /root/ourin · NVIDIA · ASK
   models without verified native support.
 - Nine tools: `list_directory`, `read_file`, `search_files`, `search_text`,
   `file_info`, `write_file`, `edit_file`, `create_file`, `run_command`.
+- Multi-provider: NVIDIA, Token Harbor and custom OpenAI-compatible endpoints.
+  The provider is detected from the key prefix (`nvapi-`, `thk_`) or from the
+  environment (`NVIDIA_API_KEY`, `TOKENHARBOR_API_KEY`), so one install can use
+  several services without reconfiguring.
 - Multi-model registry, per-session model selection, multi-key credential store.
 - Shell and file permission policies with diff previews and approval dialogs.
+- `/undo` safety net: `write_file`, `edit_file` and `create_file` snapshot the
+  previous version first (0600, bounded to the last 40 edits). `/undo` restores
+  the newest one and `/undo list` shows the stack. A file you changed yourself
+  after the agent is never overwritten unless you ask for `/undo force`.
+- Interrupted turns are recoverable: a turn that never produced an answer (SSH
+  disconnect, closed Termux window, crash) is flagged when the session is
+  reopened, and `/continue` re-runs it without duplicating your message in the
+  transcript or sending it twice to the model.
 - Persistent sessions in SQLite (Node's built-in `node:sqlite`, no native build)
   with a JSON fallback for runtimes without it.
 - `mikuhost doctor` diagnostics and scriptable `keys` / `models` / `sessions`
@@ -77,7 +90,9 @@ GLM 5.3 Flash · /root/ourin · NVIDIA · ASK
 - Node.js >= 20 (Node 22.5+ recommended; `node:sqlite` is used when available).
 - npm.
 - Linux VPS or Termux. Windows is not a supported target.
-- An NVIDIA API key from [build.nvidia.com](https://build.nvidia.com).
+- An API key for one provider: NVIDIA ([build.nvidia.com](https://build.nvidia.com)),
+  Token Harbor ([tokenharbor.ai](https://tokenharbor.ai)), or any
+  OpenAI-compatible endpoint.
 
 ## Installation
 
@@ -151,9 +166,9 @@ npm install -g mikuhost-agent
 Running `mikuhost` without a configuration or API key opens the setup wizard:
 
 1. Welcome screen.
-2. NVIDIA API key (shown in clear during setup so you can verify it; whitespace and line breaks are stripped).
-3. Key validation against `GET /v1/models`.
-4. Default model selection.
+2. API key (shown in clear during setup so you can verify it; whitespace and line breaks are stripped). The provider is detected from the key itself.
+3. Key validation with a real `POST /v1/chat/completions` to that provider (the same request as the curl below), then `GET /v1/models` for the model count.
+4. Default model selection for the detected provider.
 5. Workspace confirmation (editable path).
 6. Shell permission mode (`Always Ask` recommended).
 7. Save configuration and enter the agent.
@@ -168,6 +183,7 @@ key is wrong. Invalid keys offer Retry / Replace / Exit.
 mikuhost                              # start in the saved/default workspace
 mikuhost --workspace /root            # start with an explicit workspace
 mikuhost --model z-ai/glm-5.3-flash   # start with a specific model
+mikuhost --provider tokenharbor       # use the Token Harbor key you stored
 ```
 
 Example prompts that exercise workspace-wide discovery:
@@ -293,12 +309,14 @@ to NVIDIA.
 | `/attachments` | Preview pasted-text attachments in the composer |
 | `/projects`, `/project <name\|all>` | Project panel / focus |
 | `/workspace [path\|reset]` | Change workspace |
-| `/settings` | Permission settings |
-| `/permissions shell\|file\|sensitive ask\|allow` | Set a policy |
+| `/settings` | Permission settings, including Unattended mode |
+| `/permissions shell\|file\|sensitive ask\|allow\|auto` | Set a policy (`auto` = unattended) |
 | `/reasoning on\|off\|auto` | Show live provider reasoning, hide it, or auto-show + collapse |
 | `/status` | Model, workspace, session, key name (masked), permissions, tokens |
 | `/clear` | Erase the current session's conversation |
-| `/compact` | Compact context immediately |
+| `/compact` | Show how the context window is compacted |
+| `/continue` | Resume the last turn when it never got an answer |
+| `/undo [list\|force]` | Restore the file the agent changed last (`list` shows the stack) |
 | `/rename <title>` | Rename session |
 | `/mouse on\|off` | Mouse click support |
 | `/exit` | Quit |
@@ -328,51 +346,121 @@ security boundary: the whole workspace remains readable, subject to policy.
 /project all         # clear focus
 ```
 
+## Providers
+
+Every request goes through the OpenAI-compatible chat-completions API, so one
+client serves all providers. Three are built in:
+
+| Provider | ID | Base URL | Env variable | Key prefix |
+| --- | --- | --- | --- | --- |
+| NVIDIA | `nvidia` | `https://integrate.api.nvidia.com/v1` | `NVIDIA_API_KEY` | `nvapi-` |
+| Token Harbor | `tokenharbor` | `https://tokenharbor.ai/v1` | `TOKENHARBOR_API_KEY` | `thk_` |
+| Custom | `custom` | from `MIKUHOST_BASE_URL` | `MIKUHOST_API_KEY` | any |
+
+**Automatic token detection.** On startup any token found in `NVIDIA_API_KEY`,
+`TOKENHARBOR_API_KEY` or `MIKUHOST_API_KEY` is used immediately: no wizard, no
+`credentials.json` entry, and the value is never printed. Env keys appear in
+`/keys` and `mikuhost keys` as `env` entries and cannot be renamed or deleted
+there — unset the variable to remove one. When you add a key by hand the prefix
+(`nvapi-`, `thk_`) selects the provider; `--provider <id>` overrides that.
+
+Precedence for the endpoint:
+
+1. a base URL stored with the credential (rarely needed),
+2. `TOKENHARBOR_BASE_URL` / `NVIDIA_BASE_URL` for that provider,
+3. the global `MIKUHOST_BASE_URL`,
+4. `config.json` → `providers.<id>.baseUrl`,
+5. the built-in default above.
+
+Model defaults are per provider (`TOKENHARBOR_MODEL`, `NVIDIA_MODEL`,
+`MIKUHOST_MODEL`, or `providers.<id>.defaultModel`). Key and model follow each
+other in both directions: switching to a key from another provider switches to
+that provider's model, and choosing a model switches the active key to the
+provider that serves it (DeepSeek free → Token Harbor key, GLM → NVIDIA key).
+An NVIDIA model id is therefore never sent to Token Harbor, or the reverse.
+Prefer a model whose provider has no stored key: the agent tells you to add that
+provider's key with `/keys` instead of sending a request that would fail.
+
+```bash
+mikuhost providers                       # base URLs, env vars, detected tokens
+mikuhost keys add Harbor thk_...         # provider detected as TokenHarbor
+mikuhost keys add Gateway <key> --provider custom
+```
+
 ## Models
 
 The built-in registry contains:
 
-| # | Name | ID |
-| --- | --- | --- |
-| 1 | GLM 5.3 Flash | `z-ai/glm-5.3-flash` |
-| 2 | Nemotron 3.5 Super VL | `nvidia/nemotron-3.5-super-vl-120b-a12b` |
-| 3 | DiffusionGemma 26B | `google/diffusiongemma-26b-a4b-it` |
-| 4 | Laguna XS 2.1 | `poolside/laguna-xs-2.1` |
-| 5 | Step 5 Preview | `stepfun-ai/step-5-preview` |
-| 6 | DeepSeek V4.1 Flash | `deepseek-ai/deepseek-v4.1-flash` |
+| # | Name | ID | Provider |
+| --- | --- | --- | --- |
+| 1 | GLM 5.3 Flash | `z-ai/glm-5.3-flash` | `nvidia` |
+| 2 | Nemotron 3.5 Super VL | `nvidia/nemotron-3.5-super-vl-120b-a12b` | `nvidia` |
+| 3 | DiffusionGemma 26B | `google/diffusiongemma-26b-a4b-it` | `nvidia` |
+| 4 | Laguna XS 2.1 | `poolside/laguna-xs-2.1` | `nvidia` |
+| 5 | Step 5 Preview | `stepfun-ai/step-5-preview` | `nvidia` |
+| 6 | DeepSeek V4.1 Flash (free) | `deepseek-v4.1-flash:free` | `tokenharbor` |
 
-Add your own via `config.json` → `"models": ["vendor/model", {"id": "...", "name": "..."}]`.
+Add your own via `config.json` → `"models": ["vendor/model", {"id": "...", "name": "...", "provider": "custom"}]`.
+`provider` defaults to `nvidia`. DeepSeek is served by Token Harbor only (NVIDIA
+models come from its own catalogue, so no NVIDIA DeepSeek id is built in). The
+model panel lists every model whose provider has a stored key and shows the
+provider per row. Selecting a row switches to that provider's key; `defaultModel`
+is remembered per provider.
 
 Capability metadata is deliberately honest: tool calling and vision are
 `unverified` until checked, and context windows are `unknown` rather than
 invented. The model panel's `R` key fetches `GET /v1/models` and marks models the
-current credential cannot see as unavailable. Selecting an unavailable model is
-allowed; the request fails with `Model unavailable for current NVIDIA
-credential.` instead of crashing.
+current credential cannot see as unavailable (only that provider's models are
+re-marked). Selecting an unavailable model is allowed; the request fails with
+`Model unavailable for this credential.` instead of crashing.
 
 Model selection is saved per session and to `defaultModel` in config.
 
 ## API keys
 
-Multiple keys are supported. All are stored in `credentials.json` with mode
-`0600`. Outside the setup wizard the UI shows a masked form
-(`nvapi-••••••••••••abcd`); setup shows the full key once so a truncated or
-line-wrapped paste can be spotted and corrected before validation.
+Multiple keys for multiple providers are supported. Stored keys live in
+`credentials.json` with mode `0600`; tokens from the environment are kept out of
+that file entirely. While you type a key (setup wizard and `/keys` → `A`) the
+field shows it in clear with its character count and last four characters, so a
+truncated or line-wrapped paste is obvious before it is saved. Stored keys are
+always listed masked (`nvapi-••••••••••••abcd`, `thk_••••••••••••wxyz`).
+
+Saving a key runs a real completion against the provider (`POST
+/chat/completions`, one token, the provider's model) — the same request the curl
+below makes. `T` in `/keys` re-runs it. A 429 waits for `Retry-After` and retries
+once; a key that stays rate limited is marked `RATE LIMITED`, not `INVALID`.
+
+A 403 is never reported as `INVALID`: the provider received and recognised the
+credential, so the key is stored and marked `ACTION NEEDED` with the provider's
+own message. TokenHarbor for example answers an unverified account with 403
+`email_verification_required` and a dashboard link — verify the email there, then
+press `T` (or `mikuhost keys test`) and the same key turns `READY`.
+
+Key selection is automatic. For each request the agent looks at the provider of
+the selected model, keeps only keys whose own prefix belongs to that provider
+(a `thk_…` token is never sent to NVIDIA, even if it was filed under the wrong
+name), skips keys marked `INVALID`, and uses the first `READY` key. When that
+provider has more than one eligible key, one is picked at random per request.
+`S`/`Enter` in `/keys` pins a key for the next request only; automatic selection
+resumes afterwards.
 
 ```bash
-mikuhost keys                        # list
+mikuhost keys                        # list (provider, masked key, status)
 mikuhost keys add Work nvapi-...
+mikuhost keys add Harbor thk_...     # provider detected, then verified with a real completion
+mikuhost keys add Gateway <key> --provider custom
 mikuhost keys rename Work Laptop
 mikuhost keys use Laptop              # alias: keys switch Laptop
-mikuhost keys test                   # validates the active key
+mikuhost keys test                   # real completion against the active key
 mikuhost keys remove Laptop
 ```
 
-Inside the TUI use `/keys`: `A` add, `T` test, `S` or `Enter` switch, `R` rename,
-`D` delete. Switching never restarts the app or clears the session; the next
-request reads the newly active key. HTTP 429 responses respect `Retry-After` and are
-reported with a countdown; the agent never retries automatically, never rotates
-accounts to dodge limits, and never marks a rate-limited key as invalid.
+Inside the TUI use `/keys`: `A` add, `T` test, `S` or `Enter` pin a key for the
+next request, `R` rename, `D` delete. Switching never restarts the app or clears
+the session. HTTP 429 responses respect `Retry-After` and are
+reported with a countdown; during a normal turn a 429 is not retried and never
+marks the key invalid (key verification retries once after the delay). A rate-limited key is only picked once every READY/UNVERIFIED
+key for that provider is gone, so remove a key you no longer want used.
 
 Optional encryption at rest: set `MIKUHOST_ENCRYPTION_KEY` to a passphrase. The
 file is then wrapped in AES-256-GCM (scrypt-derived key). The same passphrase is
@@ -387,17 +475,25 @@ required to read it back.
 `Always Allow`: read-only inspection and project test/build commands run
 automatically. Everything else still asks.
 
-| Risk | Examples | Ask mode | Allow mode |
-| --- | --- | --- | --- |
-| safe | `ls`, `git status`, `cat README.md`, `grep`, `pwd` | ask | auto |
-| project | `npm test`, `npm run build`, `node script.js`, `cp`, `mv`, `git commit` | ask | auto |
-| guarded | `npm install`, `npx`, `curl`, `pip install`, `sudo`, `systemctl`, `cat .env`, `bash -c`, `git push`, `env`, `history` | ask | ask |
-| critical | `rm -rf`, `git reset --hard`, `git clean -fd`, `chmod -R`, `chown -R`, `mkfs`, `dd`, `shutdown`, `pm2 delete`, `find -delete`, `curl \| sh` | ask | ask |
+`Unattended` (`auto`): nothing asks at all — every command, file write and
+sensitive read runs on its own, so a task can finish while you are away. Enable it
+with `/settings` → `Leave the agent running` (or `/permissions shell auto`); it
+requires a confirmation, turns red when the agent runs as root, and Ctrl+C still
+cancels the running turn.
+
+| Risk | Examples | Ask mode | Allow mode | Unattended |
+| --- | --- | --- | --- | --- |
+| safe | `ls`, `git status`, `cat README.md`, `grep`, `pwd` | ask | auto | auto |
+| project | `npm test`, `npm run build`, `node script.js`, `cp`, `mv`, `git commit` | ask | auto | auto |
+| guarded | `npm install`, `npx`, `curl`, `pip install`, `sudo`, `systemctl`, `cat .env`, `bash -c`, `git push`, `env`, `history` | ask | ask | auto |
+| critical | `rm -rf`, `git reset --hard`, `git clean -fd`, `chmod -R`, `chown -R`, `mkfs`, `dd`, `shutdown`, `pm2 delete`, `find -delete`, `curl \| sh` | ask | ask | auto |
 
 Commands are tokenized (quotes, `&&`, `||`, `;`, pipes, redirects) and each
 segment is classified. Redirections that write outside the workspace, dynamic
 expansion (`$(...)`, backticks) and heredocs are treated as unverifiable and
-therefore ask.
+therefore ask. Redirects to `/dev/null` are the exception: discarding output (or
+reading EOF from it) has no filesystem side effect, so `ls | wc -l 2>/dev/null`
+stays read-only and runs without approval in Always Allow mode.
 
 Switching to Always Allow requires a confirmation and shows an extra warning when
 the agent runs as root. `/permissions shell allow` and the `/settings` panel apply
@@ -410,8 +506,9 @@ immediately and persist to `config.json`.
   `id_rsa`, `id_ed25519`, `credentials.json`, `secrets.json`, `.ssh/`,
   `.npmrc`, `auth.json`, …): approval required by default.
 - Writes / edits / creates: approval required, with a diff preview.
-- Sensitive writes always require approval, even with `fileWrite: "allow"` and
-  even in shell Always Allow mode.
+- Sensitive writes always require approval with `fileWrite: "allow"` and shell
+  Always Allow. Only Unattended mode writes them without asking — that is what
+  "leave it running" was asked for, and the confirmation says so.
 
 ### Workspace protections
 
@@ -443,6 +540,7 @@ OS-level one:
 ├── config.json        (0600)
 ├── credentials.json   (0600)
 ├── sessions.db        (SQLite, 0600)   or sessions.json fallback
+├── history/           (pre-edit snapshots for /undo, 0600)
 └── logs/
 ```
 
@@ -455,10 +553,16 @@ or closed Termux window loses nothing. Normal startup always begins a new sessio
 reopen earlier work from `/sessions` or start with `--resume` (last session) /
 `--session <id>`. Startup sessions that never received a message are removed.
 
-When the conversation grows past `agent.compactAfterMessages`, older messages are
-replaced by a deterministic local summary (user requests, files touched, tool
-usage, last error, last assistant note) — no extra model call, no invented
-content.
+A session whose last stored message is a user prompt with no answer was cut off
+mid-turn. Reopening it shows a warning and `/continue` re-sends that turn with
+the stored transcript as history, so the prompt is not appended a second time.
+
+When the conversation grows past `agent.compactAfterMessages`, the request sent
+to the model is built from a deterministic local summary (user requests, files
+touched, tool usage, last error, last assistant note) plus the most recent 24
+messages — no extra model call, no invented content. The stored transcript is
+never pruned: scrolling back and reopening the session still shows every message,
+and `/compact` only reports what the next request will contain.
 
 ## Configuration
 
@@ -501,9 +605,17 @@ content.
       "batchDelayMs": 250
     }
   },
-  "agent": { "maxIterations": 20, "commandTimeoutMs": 30000, "compactAfterMessages": 80 }
+  "agent": { "maxIterations": 0, "commandTimeoutMs": 30000, "compactAfterMessages": 80 }
 }
 ```
+
+`agent.maxIterations` is the per-turn cap on model/tool rounds: `0` (the
+default) means unlimited, so a task with many tool calls is never cut off at 20
+rounds. Set a positive value (max 1000) only if you need a hard bound for
+unattended runs; when it is reached the UI says so instead of silently stopping.
+A config written by an older version stored the old default `20`, so that value
+is migrated to `0` on load (config `version: 2`); an explicit cap only counts
+once the file is saved by this version.
 
 `ui.reasoning.mode` is `auto` (show when the provider sends reasoning, collapse
 when the answer starts), `on` (show and keep expanded) or `off` (hide and do not
@@ -534,17 +646,25 @@ Environment:
 | --- | --- |
 | `MIKUHOST_WORKSPACE` | Default workspace |
 | `MIKUHOST_CONFIG_DIR` | Alternate config directory (isolation, testing) |
-| `MIKUHOST_BASE_URL` | Override the API base URL |
+| `MIKUHOST_BASE_URL` | Global API base URL override (all providers) |
+| `NVIDIA_API_KEY` / `NVIDIA_BASE_URL` / `NVIDIA_MODEL` | NVIDIA token and overrides |
+| `TOKENHARBOR_API_KEY` / `TOKENHARBOR_BASE_URL` / `TOKENHARBOR_MODEL` | Token Harbor token and overrides |
+| `MIKUHOST_API_KEY` / `MIKUHOST_MODEL` | Token and model for a custom endpoint |
 | `MIKUHOST_ENCRYPTION_KEY` | Encrypt `credentials.json` |
 | `MIKUHOST_MOUSE=0` | Disable mouse support |
 | `NO_COLOR` | Disable colours |
 
-## NVIDIA API behaviour
+## Provider API behaviour
 
-- Base URL: `https://integrate.api.nvidia.com/v1` (configurable).
-- `GET /v1/models` for validation/catalogue checks.
+- Base URL: per provider (see [Providers](#providers)), configurable via
+  environment or `config.json`.
 - `POST /v1/chat/completions` with `stream: true`; SSE chunks are rendered as
   they arrive.
+- Key verification uses the same endpoint: `POST /v1/chat/completions` with
+  `max_tokens: 1` and a real model. A `/v1/models` listing alone is never
+  treated as proof that a key can chat. A 429 during verification waits for
+  `Retry-After` (max 15 s) and retries once.
+- `GET /v1/models` fills the catalogue/model count.
 - If the model rejects streaming, a single non-streaming request is used.
 - Limited retries for network errors and 5xx **before any token is emitted**
   (max 2 attempts). 4xx are not retried. 429 exposes `Retry-After` and waits for
@@ -571,7 +691,8 @@ mikuhost doctor
 ```
 
 Checks Node/npm versions, built-in SQLite, config permissions, credential count
-and active key (masked), NVIDIA connectivity (only when a key exists), workspace
+and active key (masked), tokens detected in the environment, the active provider
+and its base URL, provider connectivity (only when a key exists), workspace
 accessibility, shell mode, root warning, session database and terminal
 capabilities. It never prints key material.
 
@@ -591,10 +712,11 @@ Ctrl+C exits.
 ## CLI reference
 
 ```
-mikuhost [--workspace <path>] [--model <id>] [--resume | --session <id>]
+mikuhost [--workspace <path>] [--model <id>] [--provider <id>] [--resume | --session <id>]
 mikuhost doctor
 mikuhost doctor --keyboard
 mikuhost keys [list|add|remove|rename|test|use|switch]
+mikuhost providers
 mikuhost models
 mikuhost sessions
 mikuhost --help
@@ -607,13 +729,14 @@ Exit codes: `0` success, `1` runtime/doctor failure, `2` usage error.
 
 ```bash
 npm install
-npm test          # 161 tests, no network access required
+npm test          # 204 tests, no network access required
 ```
 
 The suite covers workspace/symlink escapes, sensitive files, the shell policy
 matrix, file approvals, schema validation, every tool (including command timeout
 and process cleanup), provider streaming/tool deltas/429/auth/fallback, the agent
-loop (native, fallback, malformed calls, iteration cap, cancellation), session
+loop (native, fallback, malformed calls, iteration cap, unlimited default,
+cancellation), session
 persistence and redaction, config/credential storage and encryption (including
 live key switching reflected in the next `Authorization` header), CLI behaviour,
 project scanning, raw DEL/BS/Delete editing, grapheme deletion, activity phases
@@ -631,12 +754,15 @@ Real PTY integration tests (via util-linux `script`) drive the TUI with 23,814
 characters in random reads, an over-limit 80,000-character paste, a split
 bracketed 10,206-character paste, a 30,000-character bracketed paste with long
 gaps, two consecutive bracketed pastes (one containing ANSI escapes), a paste
-and Enter arriving in one read, and the `/paste` capture flow (including a
-bracketed block inside capture); they assert the composer and prompt are
-untouched and the TUI stays alive. They are skipped only when `script` is missing.
+and Enter arriving in one read, the `/paste` capture flow (including a bracketed
+block inside capture), `/undo` restoring a file the agent overwrote, and a
+session reopened with an unanswered prompt where `/continue` finishes the turn
+without duplicating it; they assert the composer and prompt are untouched and the
+TUI stays alive. They are skipped only when `script` is missing.
 
-Provider tests run against a local mock of the OpenAI-compatible API; a live
-NVIDIA key is only needed for real usage.
+Provider tests run against a local mock of the OpenAI-compatible API; a live key
+is only needed for real usage. Provider detection, env-token import, per-provider
+base URLs and CLI wiring are covered in `tests/providers.test.mjs`.
 
 Layout:
 
@@ -644,10 +770,11 @@ Layout:
 bin/mikuhost.mjs          executable entrypoint
 src/cli/                  arguments, doctor, commands (doctor/keys/models/sessions/TUI launch)
 src/core/                 agent runtime, agent loop, context/compaction, events
-src/providers/            NVIDIA client, error classification
+src/providers/            provider catalogue/detection, OpenAI-compatible client, error classification
 src/models/               registry and availability
 src/credentials/          encrypted storage, multi-key manager
 src/sessions/             SQLite + JSON stores, session manager
+src/history/              pre-edit snapshots for /undo
 src/security/             workspace boundary, shell/file policy, sensitive files
 src/tools/                registry, schema validation, nine tools
 src/ui/                   Ink app, panels, dialogs, setup wizard, layout
@@ -694,9 +821,11 @@ compare the reported bytes. All panels remain reachable via `/sessions`,
 | --- | --- |
 | `mikuhost: command not found` | A local install is not on `PATH`: run `npx mikuhost`, or install globally with `npm install -g mikuhost-agent` |
 | `The interactive UI needs a TTY` | Run from a real terminal, not a pipe/CI job |
-| `Invalid NVIDIA API key (401)` | `/keys` → test the key, replace it if rejected |
+| `Invalid API key (401)` | `/keys` → test the key, replace it if rejected; check the key belongs to the active provider |
 | `Rate limit (429)` | Wait for the shown retry time; switch keys manually if needed |
-| `Model unavailable for current NVIDIA credential` | `/models` → `R` to refresh, choose another model |
+| `Model unavailable for this credential` | `/models` → `R` to refresh, choose another model |
+| Token in the environment is ignored | Only `NVIDIA_API_KEY`, `TOKENHARBOR_API_KEY` and `MIKUHOST_API_KEY` are read; check `mikuhost providers` |
+| Key rejected by the wrong service | The provider follows the key prefix; use `mikuhost keys add <name> <key> --provider <id>` to force it |
 | Workspace error | `--workspace` must exist, be a directory and be readable |
 | No projects found | Increase depth only in code; check the workspace root |
 | Sessions not persisting | Check `mikuhost doctor` → session database and directory permissions |

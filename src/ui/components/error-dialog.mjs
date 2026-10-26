@@ -3,17 +3,18 @@ import { h } from '../h.mjs';
 import { theme } from '../theme.mjs';
 
 const TITLES = {
-  auth: 'NVIDIA API ERROR · INVALID KEY',
-  forbidden: 'NVIDIA API ERROR · ACCESS DENIED',
-  rate_limit: 'NVIDIA API ERROR · RATE LIMIT',
-  invalid_model: 'NVIDIA API ERROR · MODEL UNAVAILABLE',
-  not_found: 'NVIDIA API ERROR · ENDPOINT NOT FOUND',
-  server: 'NVIDIA API ERROR · SERVER ERROR',
-  network: 'NVIDIA API ERROR · NETWORK',
-  timeout: 'NVIDIA API ERROR · TIMEOUT',
+  auth: 'PROVIDER ERROR · INVALID KEY',
+  forbidden: 'PROVIDER ERROR · ACCESS DENIED',
+  account: 'PROVIDER ERROR · ACCOUNT ACTION REQUIRED',
+  rate_limit: 'PROVIDER ERROR · RATE LIMIT',
+  invalid_model: 'PROVIDER ERROR · MODEL UNAVAILABLE',
+  not_found: 'PROVIDER ERROR · ENDPOINT NOT FOUND',
+  server: 'PROVIDER ERROR · SERVER ERROR',
+  network: 'PROVIDER ERROR · NETWORK',
+  timeout: 'PROVIDER ERROR · TIMEOUT',
   aborted: 'REQUEST CANCELLED',
-  bad_request: 'NVIDIA API ERROR · BAD REQUEST',
-  malformed_response: 'NVIDIA API ERROR · MALFORMED RESPONSE',
+  bad_request: 'PROVIDER ERROR · BAD REQUEST',
+  malformed_response: 'PROVIDER ERROR · MALFORMED RESPONSE',
 };
 
 export function ErrorDialog({ error, width, canRetry, canChangeKey }) {

@@ -47,8 +47,10 @@ export class ToolRegistry {
     onActivity = null,
     isRootUser = false,
     session = null,
+    history = null,
   } = {}) {
     this.workspace = workspace;
+    this.history = history;
     this.config = config;
     this.requestApproval = requestApproval;
     this.onActivity = onActivity;
@@ -142,6 +144,24 @@ export class ToolRegistry {
           );
         }
         return true;
+      },
+      // Snapshot the pre-edit version so /undo can restore it. Best effort:
+      // a failed snapshot must never block the write itself.
+      recordFileSnapshot: ({ absolute, tool = 'write', previous = null, next = null }) => {
+        if (!this.history) return null;
+        try {
+          return this.history.record({
+            sessionId: this.session?.id ?? null,
+            workspace: this.workspace.root,
+            absolute,
+            relPath: relativeInside(this.workspace, absolute),
+            tool,
+            previous,
+            next,
+          });
+        } catch {
+          return null;
+        }
       },
       authorizeWrite: async (absPath, { diff = null, creating = false, contentPreview = null } = {}) => {
         const decision = evaluateFileWrite({ target: absPath, mode: permissions.fileWrite });

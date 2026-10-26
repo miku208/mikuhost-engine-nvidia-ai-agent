@@ -60,8 +60,36 @@ export function historyToApi(storedMessages = []) {
 }
 
 /**
+ * The last user message when it never received a final answer (nothing but
+ * tool traffic after it). A turn killed by an SSH drop or a crash leaves
+ * exactly this shape: user message stored, no assistant text. Returns null for
+ * a complete conversation, so callers can offer to resume instead of guessing.
+ */
+export function findUnfinishedTurn(storedMessages = []) {
+  const list = Array.isArray(storedMessages) ? storedMessages : [];
+  for (let index = list.length - 1; index >= 0; index -= 1) {
+    const message = list[index];
+    if (!message) continue;
+    // Notices and compaction markers do not end a turn.
+    if (message.role === 'system') continue;
+    if (message.role === 'user') return message;
+    if (message.role === 'assistant') {
+      const hasToolCalls = Array.isArray(message.meta?.toolCalls) && message.meta.toolCalls.length > 0;
+      // A partial answer saved by an explicit Ctrl+C counts as an answer: the
+      // user stopped it on purpose and should not be nudged to resume.
+      if (!hasToolCalls && String(message.content ?? '').trim()) return null;
+    }
+  }
+  return null;
+}
+
+/**
  * Deterministic local compaction: no extra model call, no invented content.
  * Keeps the goal, the files that were touched, the last error and recent turns.
+ *
+ * Returns a VIEW of the conversation for one request — it does not modify the
+ * argument. Callers must treat it as context-window shaping only; the session
+ * transcript stays append-only so nothing disappears from the chat.
  */
 export function compactMessages(storedMessages, { threshold = 80, keepRecent = 24 } = {}) {
   if (!Array.isArray(storedMessages) || storedMessages.length <= threshold) {
@@ -91,7 +119,7 @@ export function compactMessages(storedMessages, { threshold = 80, keepRecent = 2
     }
   }
 
-  const lines = ['[Conversation compacted locally — older messages omitted]', ''];
+  const lines = ['[Conversation compacted locally — the saved transcript keeps every message; this summary stands in for the older ones]', ''];
   if (userRequests.length) {
     lines.push('User requests so far:');
     for (const request of userRequests.slice(-12)) lines.push(`- ${request}`);
@@ -160,7 +188,7 @@ If you do not need a tool, answer normally without any <tool_call> block.`
 Workspace root: ${workspace}
 Focused project: ${focusProject ?? '(workspace root)'}
 Active model: ${modelName ?? model ?? 'unknown'}
-Shell permission mode: ${shellMode.toUpperCase()}${isRootUser ? ' (agent runs as root — commands affect the whole system)' : ''}
+Shell permission mode: ${shellMode.toUpperCase()}${shellMode === 'auto' ? ' (unattended — commands, file writes and sensitive reads run without approval; do not stop to ask, finish the task)' : ''}${isRootUser ? ' (agent runs as root — commands affect the whole system)' : ''}
 
 Projects discovered in this workspace:
 ${projectList || '- (none detected yet)'}

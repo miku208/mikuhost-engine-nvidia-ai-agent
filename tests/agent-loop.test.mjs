@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import path from 'node:path';
 import { runAgentLoop, extractProtocolToolCalls, ToolProtocolFilter } from '../src/core/agent-loop.mjs';
 import { ProviderError, ERROR_CODES } from '../src/providers/errors.mjs';
-import { compactMessages, buildSystemPrompt, historyToApi } from '../src/core/context.mjs';
+import { compactMessages, buildSystemPrompt, historyToApi, findUnfinishedTurn } from '../src/core/context.mjs';
 import { AgentRuntime } from '../src/core/agent.mjs';
 import { PHASES } from '../src/core/events.mjs';
 import { SessionManager } from '../src/sessions/manager.mjs';
@@ -213,7 +213,7 @@ test('agent loop: respects the iteration cap', async () => {
   });
   assert.equal(result.iterations, 2);
   assert.equal(provider.calls.length, 2);
-  assert.ok(events.some((event) => event.type === 'warning' && /maximum/.test(event.message)));
+  assert.ok(events.some((event) => event.type === 'warning' && /limit of 2/.test(event.message)));
 });
 
 test('agent loop: pre-aborted signal never calls the provider', async () => {
@@ -365,6 +365,61 @@ test('context: history conversion drops orphan tool messages', () => {
     { role: 'assistant', content: 'ok' },
   ]);
   assert.deepEqual(api.map((message) => message.role), ['user', 'assistant']);
+});
+
+test('agent runtime: compaction summarizes the request but never trims the transcript', async () => {
+  const dir = tempDir('mikuhost-compact-');
+  const root = workspaceFixture();
+  try {
+    const config = makeConfigStub({ workspace: root, agent: { compactAfterMessages: 30 } });
+    const workspace = new Workspace(root);
+    const store = openSessionStore({ file: path.join(dir, 'sessions.db') });
+    const session = new SessionManager({ store, config, workspace: root });
+    session.create({ model: 'z-ai/glm-5.3-flash', workspace: root });
+
+    for (let index = 0; index < 20; index += 1) {
+      session.appendMessage({ role: 'user', content: `request ${index}` });
+      session.appendMessage({ role: 'assistant', content: `answer ${index}` });
+    }
+    const before = session.messages.length;
+
+    const credentials = {
+      activeEntry: () => ({ id: 'k', name: 'Test', key: 'nvapi-test' }),
+      touch: () => {},
+      reportFailure: () => {},
+    };
+    const provider = scriptedProvider([[{ type: 'text', text: 'done' }, { type: 'done', finishReason: 'stop' }]]);
+    const events = [];
+    const runtime = new AgentRuntime({ config, workspace, credentials, session, providerFactory: () => provider });
+    runtime.setEventHandler((event) => events.push(event));
+
+    await runtime.send('lanjut');
+
+    assert.equal(session.messages.length, before + 2, 'older messages must stay in the transcript');
+    assert.equal(session.messages[0].content, 'request 0');
+
+    const sent = provider.calls[0].messages;
+    assert.equal(sent[0].role, 'system');
+    assert.match(sent[1].content, /compacted locally/);
+    assert.match(sent[1].content, /request 0/);
+    // The loop appends its own assistant/tool turns to the same array, so the
+    // prompt is checked as the last user message rather than the last entry.
+    assert.equal(sent.filter((message) => message.role === 'user').at(-1).content, 'lanjut');
+    assert.ok(sent.length < before, 'the request itself is compacted');
+
+    await runtime.send('lagi');
+    const warnings = events.filter((event) => event.type === 'warning' && /compact/i.test(event.message));
+    assert.equal(warnings.length, 1, 'compaction is announced once per session');
+    assert.equal(session.messages.length, before + 4);
+
+    store.close();
+    const reopened = openSessionStore({ file: path.join(dir, 'sessions.db') });
+    assert.equal(reopened.getMessages(session.id).length, before + 4, 'a reopened session keeps every message');
+    reopened.close();
+  } finally {
+    cleanupDir(dir);
+    cleanupDir(root);
+  }
 });
 
 test('agent runtime: sends a turn, persists it and honours credentials', async () => {
@@ -545,6 +600,107 @@ test('agent runtime: approval emits WAITING_APPROVAL and executes only after a d
     assert.ok(waiting >= 0, 'approval phase must be reported');
     assert.ok(workingAfter > waiting, 'tool work resumes after the approval dialog is answered');
     assert.ok(events.some((event) => event.type === 'tool-end' && event.ok === false));
+    store.close();
+  } finally {
+    cleanupDir(dir);
+    cleanupDir(root);
+  }
+});
+
+test('agent loop: no iteration cap by default, so long tasks finish', async () => {
+  const toolTurn = [
+    {
+      type: 'done',
+      finishReason: 'tool_calls',
+      toolCalls: [{ id: 'c', type: 'function', function: { name: 'read_file', arguments: '{"path":"a"}' } }],
+    },
+  ];
+  const rounds = 25;
+  const provider = scriptedProvider([...Array.from({ length: rounds }, () => toolTurn), [
+    { type: 'text', text: 'finished the whole task' },
+    { type: 'done', finishReason: 'stop' },
+  ]]);
+  const events = [];
+  const result = await runAgentLoop({
+    provider,
+    model: 'm',
+    messages: baseMessages,
+    tools: [{ type: 'function', function: { name: 'read_file', parameters: { type: 'object' } } }],
+    executeTool: async () => ({ ok: true, output: 'again' }),
+    onEvent: (event) => events.push(event),
+  });
+
+  assert.equal(result.iterations, rounds + 1);
+  assert.equal(provider.calls.length, rounds + 1);
+  assert.equal(result.text, 'finished the whole task');
+  assert.equal(
+    events.some((event) => event.type === 'warning' && /limit of .* iterations/.test(event.message)),
+    false,
+    'no cap warning when the loop is unlimited',
+  );
+});
+
+test('context: findUnfinishedTurn flags only a prompt that never got an answer', () => {
+  assert.equal(findUnfinishedTurn([]), null);
+  assert.equal(findUnfinishedTurn([{ role: 'user', content: 'do it' }]).content, 'do it');
+  assert.equal(
+    findUnfinishedTurn([{ role: 'user', content: 'do it' }, { role: 'assistant', content: 'done' }]),
+    null,
+  );
+  const cutOff = findUnfinishedTurn([
+    { role: 'user', content: 'do it' },
+    { role: 'assistant', content: '', meta: { toolCalls: [{ id: 'c1' }] } },
+    { role: 'tool', content: 'read ok', meta: { toolCallId: 'c1' } },
+  ]);
+  assert.equal(cutOff.content, 'do it', 'a turn that stopped after tools is unfinished');
+  assert.equal(
+    findUnfinishedTurn([
+      { role: 'user', content: 'do it' },
+      { role: 'assistant', content: 'partial', meta: { aborted: true } },
+    ]),
+    null,
+    'a partial answer from an explicit Ctrl+C counts as answered',
+  );
+  assert.equal(
+    findUnfinishedTurn([{ role: 'user', content: 'do it' }, { role: 'system', content: 'notice' }]).content,
+    'do it',
+  );
+});
+
+test('agent runtime: continueTurn resumes an unanswered prompt without duplicating it', async () => {
+  const dir = tempDir('mikuhost-continue-');
+  const root = workspaceFixture();
+  try {
+    const config = makeConfigStub({ workspace: root });
+    const workspace = new Workspace(root);
+    const store = openSessionStore({ file: path.join(dir, 'sessions.db') });
+    const session = new SessionManager({ store, config, workspace: root });
+    session.create({ model: 'z-ai/glm-5.3-flash', workspace: root });
+    session.appendMessage({ role: 'user', content: 'Fix the reconnection bug' });
+
+    const credentials = {
+      activeEntry: () => ({ id: 'k', name: 'Test', key: 'nvapi-test' }),
+      touch: () => {},
+      reportFailure: () => {},
+    };
+    const provider = scriptedProvider([[{ type: 'text', text: 'Here is the fix.' }, { type: 'done', finishReason: 'stop' }]]);
+    const runtime = new AgentRuntime({ config, workspace, credentials, session, providerFactory: () => provider });
+
+    assert.equal(findUnfinishedTurn(session.messages).content, 'Fix the reconnection bug');
+    const result = await runtime.continueTurn();
+    assert.equal(result.text, 'Here is the fix.');
+    assert.equal(result.error, null);
+
+    const sent = provider.calls[0].messages;
+    const sentUser = sent.filter((message) => message.role === 'user');
+    assert.equal(sentUser.length, 1, 'the prompt is sent once, not appended again');
+    assert.equal(sentUser[0].content, 'Fix the reconnection bug');
+    assert.equal(session.messages.filter((message) => message.role === 'user').length, 1);
+    assert.equal(session.messages.at(-1).role, 'assistant');
+    assert.equal(session.messages.at(-1).content, 'Here is the fix.');
+    assert.equal(findUnfinishedTurn(session.messages), null, 'the turn is complete now');
+
+    await assert.rejects(() => runtime.continueTurn(), /no unfinished turn/i);
     store.close();
   } finally {
     cleanupDir(dir);

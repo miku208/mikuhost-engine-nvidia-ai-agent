@@ -135,7 +135,9 @@ export async function runAgentLoop({
   messages: initialMessages,
   tools = [],
   executeTool,
-  maxIterations = 20,
+  // 0 (the default) means unlimited: a long task with many tool calls is not
+  // cut off mid-way. A positive value caps the loop for unattended runs.
+  maxIterations = 0,
   onEvent = () => {},
   signal = null,
   streaming = true,
@@ -160,16 +162,22 @@ export async function runAgentLoop({
   let fallbackSwitches = 0;
   let protocolFailures = 0;
   const toolsUsed = [];
+  const iterationLimit = Number(maxIterations) > 0 ? Math.floor(Number(maxIterations)) : 0;
 
-  for (let iteration = 1; iteration <= maxIterations; iteration += 1) {
+  for (let iteration = 1; !iterationLimit || iteration <= iterationLimit; iteration += 1) {
     if (signal?.aborted) {
       aborted = true;
       break;
     }
     iterations = iteration;
-    onEvent({ type: 'iteration', iteration, mode, maxIterations });
+    onEvent({ type: 'iteration', iteration, mode, maxIterations: iterationLimit });
     onEvent({ type: 'phase', phase: PHASES.THINKING });
-    onEvent({ type: 'status', message: `Waiting for model response… (turn ${iteration}/${maxIterations})` });
+    onEvent({
+      type: 'status',
+      message: iterationLimit
+        ? `Waiting for model response… (turn ${iteration}/${iterationLimit})`
+        : `Waiting for model response… (turn ${iteration})`,
+    });
 
     let rawText = '';
     let toolCalls = [];
@@ -421,10 +429,10 @@ export async function runAgentLoop({
     break;
   }
 
-  if (iterations >= maxIterations) {
+  if (iterationLimit && iterations >= iterationLimit) {
     onEvent({
       type: 'warning',
-      message: `Reached the maximum of ${maxIterations} agent iterations. Send another message to continue.`,
+      message: `Reached the configured limit of ${iterationLimit} agent iterations. Send another message to continue, or set agent.maxIterations to 0 for no limit.`,
     });
   }
 

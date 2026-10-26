@@ -47,7 +47,7 @@ function killProcessTree(child) {
 export const runCommandTool = {
   name: 'run_command',
   description:
-    'Run a shell command in a workspace directory. Returns exit code, stdout and stderr. Destructive or unverifiable commands (rm -rf, git reset --hard, sudo, installers, network egress, inline interpreter code) always require explicit approval, even in Always Allow mode.',
+    'Run a shell command in a workspace directory. Returns exit code, stdout and stderr. Destructive or unverifiable commands (rm -rf, git reset --hard, sudo, installers, network egress, inline interpreter code) require explicit approval in Always Ask and Always Allow modes; only Unattended mode runs them without asking.',
   permission: 'command',
   parameters: {
     type: 'object',
@@ -69,7 +69,7 @@ export const runCommandTool = {
     const cwd = resolveToolPath(ctx, input.cwd ?? '.', { mustExist: true });
     if (!fs.statSync(cwd).isDirectory()) throw new ToolError('cwd must be a directory inside the workspace.', 'NOT_A_DIRECTORY');
 
-    const mode = ctx.permissions.shell === 'allow' ? 'allow' : 'ask';
+    const mode = ['allow', 'auto'].includes(ctx.permissions.shell) ? ctx.permissions.shell : 'ask';
     const verdict = evaluateShellCommand({ command, mode, workspaceRoot: ctx.workspace.root });
     const relCwd = relativeInside(ctx.workspace, cwd);
 

@@ -6,7 +6,16 @@ import { runDoctor, printDoctor } from './doctor.mjs';
 import { ConfigManager, ensureConfigDir } from '../config/manager.mjs';
 import { CredentialManager } from '../credentials/manager.mjs';
 import { validateKeyFormat } from '../credentials/storage.mjs';
-import { NvidiaProvider } from '../providers/nvidia.mjs';
+import {
+  createProvider,
+  detectedEnvProvider,
+  envKeyNames,
+  getProvider,
+  providerIds,
+  providerList,
+  providerName,
+  resolveProviderId,
+} from '../providers/catalog.mjs';
 import { ModelRegistry } from '../models/registry.mjs';
 import { openSessionStore } from '../sessions/database.mjs';
 import { resolveWorkspaceRoot, Workspace, isRootUser } from '../security/workspace.mjs';
@@ -27,11 +36,12 @@ export function packageVersion() {
 function printKeyList(manager) {
   if (manager.size === 0) {
     process.stdout.write(
-      `${color.yellow('No NVIDIA API keys stored.')}\nRun ${color.bold('mikuhost')} to start the setup wizard, or ${color.bold('mikuhost keys add <name> <key>')}.\n`,
+      `${color.yellow('No API keys stored.')}\nRun ${color.bold('mikuhost')} to start the setup wizard, or ${color.bold('mikuhost keys add <name> <key>')}.\n` +
+        `${color.dim(`Tokens in ${envKeyNames().join(', ')} are detected automatically.`)}\n`,
     );
     return;
   }
-  process.stdout.write(`${color.bold('NVIDIA API KEYS')}\n\n`);
+  process.stdout.write(`${color.bold('API KEYS')}\n\n`);
   for (const entry of manager.list()) {
     const marker = entry.active ? color.green('●') : color.dim('○');
     const status =
@@ -39,15 +49,105 @@ function printKeyList(manager) {
         ? color.red('invalid')
         : entry.status === 'rate_limited'
           ? color.yellow('rate-limited')
-          : entry.status === 'unverified'
-            ? color.yellow('unverified')
-            : color.green('ready');
+          : entry.status === 'blocked'
+            ? color.yellow('action needed')
+            : entry.status === 'unverified'
+              ? color.yellow('unverified')
+              : color.green('ready');
     const used = entry.lastUsedAt ? `used ${formatRelativeTime(entry.lastUsedAt)} ago` : 'never used';
+    const origin = entry.source === 'env' ? ` ${color.cyan('env')}` : '';
     process.stdout.write(
-      `${marker} ${entry.name.padEnd(16)} ${entry.masked.padEnd(22)} ${status.padEnd(20)} ${color.dim(used)}\n`,
+      `${marker} ${entry.name.padEnd(16)} ${entry.providerName.padEnd(12)} ${entry.masked.padEnd(22)} ${status.padEnd(20)} ${color.dim(used)}${origin}\n`,
     );
   }
   process.stdout.write(`\n${color.dim('Manage keys interactively with /keys inside mikuhost.')}\n`);
+}
+
+function providersCommand() {
+  const config = new ConfigManager();
+  config.load();
+  const manager = new CredentialManager();
+  const active = manager.activeEntry();
+  const envProvider = detectedEnvProvider(process.env);
+  process.stdout.write(`${color.bold('PROVIDERS')}\n\n`);
+  for (const provider of providerList()) {
+    const isActive = (active?.provider ?? config.providerId) === provider.id;
+    const marker = isActive ? color.green('●') : color.dim('○');
+    const stored = manager.list().filter((entry) => entry.provider === provider.id);
+    const baseUrl = provider.id === 'custom' ? config.baseUrlFor('custom') || '(not set)' : config.baseUrlFor(provider.id);
+    process.stdout.write(`${marker} ${provider.name} ${color.dim(`(${provider.id})`)}${isActive ? color.green('  active') : ''}\n`);
+    process.stdout.write(`    ${color.dim('base URL')}  ${baseUrl}\n`);
+    process.stdout.write(`    ${color.dim('env')}       ${provider.envKeys.join(', ')}${envProvider === provider.id ? color.cyan('  ← detected') : ''}\n`);
+    process.stdout.write(`    ${color.dim('keys')}      ${stored.length ? stored.map((entry) => `${entry.name} ${entry.masked}`).join(', ') : 'none stored'}\n`);
+    process.stdout.write(`    ${color.dim('models')}    ${config.modelFor(provider.id) ?? '(none configured)'}\n`);
+  }
+  process.stdout.write(
+    `\n${color.dim('Add a key with `mikuhost keys add <name> <key>` — the provider is detected from the key prefix.')}\n` +
+      `${color.dim('A stored base URL or TOKENHARBOR_BASE_URL / MIKUHOST_BASE_URL overrides the defaults above.')}\n`,
+  );
+  return 0;
+}
+
+/**
+ * Verify a key with the real chat endpoint, exactly like the manual curl:
+ * POST /chat/completions with a bearer token. A catalogue listing is not proof
+ * of a working key. A 429 waits for Retry-After and retries once.
+ */
+async function probeKey(config, entry, key) {
+  const providerId = resolveProviderId(entry.provider);
+  const model = entry.model || config.modelFor(providerId);
+  const provider = createProvider({
+    provider: providerId,
+    baseUrl: entry.baseUrl || config.baseUrlFor(providerId),
+    apiKey: key,
+  });
+  const result = await provider.validateKey(key, {
+    model,
+    attempts: 2,
+    onWait: ({ waitMs, next }) => {
+      process.stdout.write(
+        `${color.yellow('!')} Rate limited · waiting ${Math.ceil(waitMs / 1000)}s before attempt ${next}…\n`,
+      );
+    },
+  });
+  return { providerId, model, result };
+}
+
+function reportProbe(manager, entry, providerId, model, result) {
+  if (result.valid) {
+    manager.setStatus(entry.id, 'ready');
+    process.stdout.write(
+      `${color.green('✓')} ${entry.name}: key accepted by ${providerName(providerId)}${model ? ` with ${model}` : ''}${result.warning ? ` — ${result.warning}` : ''}. ${result.models?.length ?? 0} models available.\n`,
+    );
+    return 0;
+  }
+  if (result.blocked) {
+    manager.setStatus(entry.id, 'blocked', result.error?.message);
+    const detail = result.error?.message ?? 'account restricted';
+    process.stdout.write(
+      `${color.yellow('!')} ${entry.name}: ${providerName(providerId)} accepted the key, but the account needs action · ${detail}\n`,
+    );
+    return 1;
+  }
+  if (result.rateLimited) {
+    manager.setStatus(entry.id, 'rate_limited', result.error?.message);
+    const seconds = result.retryAfterMs ? Math.ceil(result.retryAfterMs / 1000) : null;
+    process.stdout.write(
+      `${color.yellow('!')} ${entry.name}: still rate limited${seconds ? ` · retry in ${seconds}s` : ''}. The key was not rejected; test again later.\n`,
+    );
+    return 1;
+  }
+  if (result.offline) {
+    process.stdout.write(`${color.yellow('!')} Network unreachable; key could not be verified.\n`);
+    return 1;
+  }
+  if (result.inconclusive) {
+    process.stdout.write(`${color.yellow('!')} Provider returned an unexpected error: ${result.error?.message}\n`);
+    return 1;
+  }
+  manager.setStatus(entry.id, 'invalid', result.error?.message);
+  process.stdout.write(`${color.red('✗')} ${entry.name}: ${result.error?.message}\n`);
+  return 1;
 }
 
 async function testKey(manager, selector) {
@@ -58,28 +158,21 @@ async function testKey(manager, selector) {
   }
   const config = new ConfigManager();
   config.load();
-  const provider = new NvidiaProvider({ baseUrl: config.baseUrl, apiKey: entry.key });
-  process.stdout.write(`Testing ${entry.name} (${maskKey(entry.key)})…\n`);
-  const result = await provider.validateKey(entry.key);
-  if (result.valid) {
-    manager.setStatus(entry.id, 'ready');
-    process.stdout.write(`${color.green('✓')} Key is valid. ${result.models.length} models available.\n`);
-    return 0;
-  }
-  if (result.offline) {
-    process.stdout.write(`${color.yellow('!')} Network unreachable; key could not be verified.\n`);
+  const providerId = resolveProviderId(entry.provider);
+  const model = entry.model || config.modelFor(providerId);
+  process.stdout.write(
+    `Testing ${entry.name} · ${providerName(providerId)} · ${entry.key.length} chars (ends …${entry.key.slice(-4)})${model ? ` · ${model}` : ''}…\n`,
+  );
+  try {
+    const { result } = await probeKey(config, entry, entry.key);
+    return reportProbe(manager, entry, providerId, model, result);
+  } catch (error) {
+    process.stderr.write(`${color.red('Test failed:')} ${error.message}\n`);
     return 1;
   }
-  if (result.inconclusive) {
-    process.stdout.write(`${color.yellow('!')} Provider returned an unexpected error: ${result.error.message}\n`);
-    return 1;
-  }
-  manager.setStatus(entry.id, 'invalid', result.error.message);
-  process.stdout.write(`${color.red('✗')} ${result.error.message}\n`);
-  return 1;
 }
 
-async function keysCommand(args) {
+async function keysCommand(args, options = {}) {
   const manager = new CredentialManager();
   const [sub, ...rest] = args;
   if (!sub || sub === 'list') {
@@ -92,15 +185,48 @@ async function keysCommand(args) {
       process.stderr.write('Usage: mikuhost keys add <name> <key>\n');
       return 2;
     }
-    const check = validateKeyFormat(key);
+    const requested = options.provider ? resolveProviderId(options.provider) : null;
+    if (options.provider && !getProvider(options.provider)) {
+      process.stderr.write(
+        `${color.red(`Unknown provider: ${options.provider}`)}. Use one of: ${providerIds().join(', ')}\n`,
+      );
+      return 2;
+    }
+    const check = validateKeyFormat(key, { provider: requested });
     if (!check.ok) {
       process.stderr.write(`${color.red(check.reason)}\n`);
       return 2;
     }
     if (check.warning) process.stderr.write(`${color.yellow(check.warning)}\n`);
     try {
-      const added = manager.add({ name, key });
-      process.stdout.write(`${color.green('✓')} Added ${added.name} (${added.masked}).\n`);
+      const added = manager.add({ name, key, provider: requested });
+      const config = new ConfigManager();
+      config.load();
+      // Adding a key does not steal the active slot from an existing key; the
+      // config provider always follows whichever key is actually active.
+      config.setProvider(manager.activeEntry()?.provider ?? added.provider);
+      process.stdout.write(
+        `${color.green('✓')} Added ${added.name} (${added.masked}, ${key.length} chars, ends …${key.slice(-4)}) · ${added.providerName}.\n`,
+      );
+      // Verify immediately with a real completion, the same request the agent
+      // will send; a catalogue listing can succeed for a key chat rejects. The
+      // key is already stored, so a failed probe never undoes the add.
+      const providerId = resolveProviderId(added.provider);
+      const model = added.model || config.modelFor(providerId);
+      const baseUrl = added.baseUrl || config.baseUrlFor(providerId);
+      if (!baseUrl) {
+        process.stdout.write(
+          `${color.dim('No base URL configured for this provider; skipping the verification request.')}\n`,
+        );
+        return 0;
+      }
+      process.stdout.write(`Testing with a real completion${model ? ` (${model})` : ''}…\n`);
+      try {
+        const probe = await probeKey(config, added, key);
+        reportProbe(manager, added, probe.providerId, probe.model, probe.result);
+      } catch (error) {
+        process.stdout.write(`${color.yellow('!')} Verification skipped: ${error.message}\n`);
+      }
       return 0;
     } catch (error) {
       process.stderr.write(`${color.red(error.message)}\n`);
@@ -137,7 +263,12 @@ async function keysCommand(args) {
       return 1;
     }
     manager.setActive(entry.id);
-    process.stdout.write(`${color.green('✓')} Active key: ${entry.name} (${maskKey(entry.key)}).\n`);
+    const config = new ConfigManager();
+    config.load();
+    config.setProvider(entry.provider);
+    process.stdout.write(
+      `${color.green('✓')} Active key: ${entry.name} · ${providerName(entry.provider)} (${maskKey(entry.key)}).\n`,
+    );
     return 0;
   }
   if (sub === 'test') {
@@ -165,7 +296,7 @@ function modelsCommand(options = {}) {
       model.capabilities.contextWindow ? `${model.capabilities.contextWindow} ctx` : 'ctx unknown',
     ].join(' · ');
     process.stdout.write(`${marker} ${String(index + 1).padStart(2)}. ${model.name}\n`);
-    process.stdout.write(`    ${color.dim(model.id)}\n`);
+    process.stdout.write(`    ${color.dim(model.id)} · ${color.dim(model.provider ?? 'nvidia')}\n`);
     process.stdout.write(`    ${color.dim(caps)}\n`);
   });
   process.stdout.write(
@@ -202,6 +333,28 @@ function resolveStartupWorkspace(config, explicit) {
 async function launchInteractive(options, { cwd }) {
   const config = new ConfigManager();
   config.load();
+  if (options.provider) {
+    if (!getProvider(options.provider)) {
+      process.stderr.write(
+        `${color.red(`Unknown provider: ${options.provider}`)}. Use one of: ${providerIds().join(', ')}\n`,
+      );
+      return 2;
+    }
+    const providerId = resolveProviderId(options.provider);
+    const manager = new CredentialManager();
+    const entry = manager.firstForProvider(providerId);
+    if (entry) {
+      manager.setActive(entry.id);
+      config.setProvider(providerId);
+    } else {
+      process.stderr.write(
+        `${color.yellow('No key for provider')} ${providerName(providerId)}\n` +
+          `Add one: ${color.bold(`mikuhost keys add <name> <key> --provider ${providerId}`)}\n` +
+          `or set ${getProvider(providerId).envKeys.join(' / ')} in the environment.\n`,
+      );
+      return 1;
+    }
+  }
   let workspace;
   try {
     workspace = resolveStartupWorkspace(config, options.workspace);
@@ -279,7 +432,9 @@ export async function main(argv = process.argv.slice(2), { cwd = process.cwd() }
       return report.exitCode;
     }
     case 'keys':
-      return keysCommand(parsed.args);
+      return keysCommand(parsed.args, parsed.options);
+    case 'providers':
+      return providersCommand();
     case 'models':
       return modelsCommand(parsed.options);
     case 'sessions':

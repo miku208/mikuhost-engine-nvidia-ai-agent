@@ -6,6 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { openSessionStore } from '../src/sessions/database.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const HAS_SCRIPT = spawnSync('sh', ['-c', 'command -v script'], { encoding: 'utf8' }).status === 0;
@@ -50,20 +51,51 @@ function chunked(text, seed = 11, min = 1, max = 4096) {
   return chunks;
 }
 
-async function startMockServer() {
+async function startMockServer({ toolCall = null } = {}) {
   const requests = [];
+  const raw = [];
   const server = http.createServer((req, res) => {
     let body = '';
     req.on('data', (chunk) => {
       body += chunk;
     });
     req.on('end', () => {
+      let parsed = null;
       try {
-        requests.push(JSON.parse(body));
+        parsed = JSON.parse(body);
       } catch {
-        requests.push(null);
+        parsed = null;
       }
+      requests.push(parsed);
+      raw.push({ headers: { ...req.headers }, body: parsed });
       res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+      // First turn may ask for one tool call, so an approval dialog can be
+      // exercised; after that the model answers normally and the loop ends.
+      if (toolCall && requests.length === 1) {
+        res.write(
+          `data: ${JSON.stringify({
+            choices: [
+              {
+                index: 0,
+                delta: {
+                  tool_calls: [
+                    {
+                      index: 0,
+                      id: 'call_1',
+                      type: 'function',
+                      function: { name: toolCall.name, arguments: JSON.stringify(toolCall.arguments) },
+                    },
+                  ],
+                },
+              },
+            ],
+          })}\n\n`,
+        );
+        res.write(`data: ${JSON.stringify({ choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }] })}\n\n`);
+        res.write('data: [DONE]\n\n');
+        res.end();
+        return;
+      }
       res.write(`data: ${JSON.stringify({ choices: [{ index: 0, delta: { content: 'OK' } }] })}\n\n`);
       res.write(`data: ${JSON.stringify({ choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] })}\n\n`);
       res.write('data: [DONE]\n\n');
@@ -75,11 +107,13 @@ async function startMockServer() {
   return {
     url: `http://127.0.0.1:${port}/v1`,
     requests,
+    /** Requests with their headers, for provider/credential assertions. */
+    raw,
     close: () => new Promise((resolve) => server.close(resolve)),
   };
 }
 
-function fixture(prefix, baseUrl) {
+function fixture(prefix, baseUrl, { keys = null } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
   const configDir = path.join(root, 'config');
   const workspace = path.join(root, 'workspace');
@@ -92,26 +126,27 @@ function fixture(prefix, baseUrl) {
       setupComplete: true,
       workspace,
       provider: 'nvidia',
-      providers: { nvidia: { baseUrl } },
+      // Every provider points at the mock server so a key switch (which also
+      // switches provider) never reaches the real internet during a test.
+      providers: { nvidia: { baseUrl }, tokenharbor: { baseUrl }, custom: { baseUrl } },
       defaultModel: 'z-ai/glm-5.3-flash',
       permissions: { shell: 'ask', fileWrite: 'ask', sensitiveRead: 'ask' },
       ui: { mouse: false },
     }),
   );
+  const storedKeys = keys ?? [
+    { id: 'k1', name: 'PTY', key: 'nvapi-pty-test-1234567890abcdef', createdAt: 1, status: 'ready' },
+  ];
   fs.writeFileSync(
     path.join(configDir, 'credentials.json'),
-    JSON.stringify({
-      version: 1,
-      activeId: 'k1',
-      keys: [{ id: 'k1', name: 'PTY', key: 'nvapi-pty-test-1234567890abcdef', createdAt: 1, status: 'ready' }],
-    }),
+    JSON.stringify({ version: 1, activeId: storedKeys[0].id, keys: storedKeys }),
   );
   return { root, configDir, workspace };
 }
 
 /** Run the real TUI inside a PTY via util-linux `script`, which forwards stdin. */
-function launch(fixtureDir) {
-  const command = `${JSON.stringify(process.execPath)} ${JSON.stringify(path.join(ROOT, 'bin', 'mikuhost.mjs'))} --workspace ${JSON.stringify(fixtureDir.workspace)}`;
+function launch(fixtureDir, extraArgs = []) {
+  const command = `${JSON.stringify(process.execPath)} ${JSON.stringify(path.join(ROOT, 'bin', 'mikuhost.mjs'))} --workspace ${JSON.stringify(fixtureDir.workspace)}${extraArgs.map((arg) => ` ${JSON.stringify(arg)}`).join('')}`;
   const child = spawn('script', ['-q', '-e', '-c', command, '/dev/null'], {
     cwd: ROOT,
     env: {
@@ -157,10 +192,10 @@ function launch(fixtureDir) {
   };
 }
 
-async function startPty(prefix) {
-  const server = await startMockServer();
-  const fixtureDir = fixture(prefix, server.url);
-  const tui = launch(fixtureDir);
+async function startPty(prefix, options = {}) {
+  const server = await startMockServer({ toolCall: options.toolCall ?? null });
+  const fixtureDir = fixture(prefix, server.url, options);
+  const tui = launch(fixtureDir, options.args ?? []);
   const ready = await waitFor(() => /MIKUHOST AGENT/.test(tui.output));
   assert.ok(ready, `TUI did not start:\n${tui.output.slice(-2000)}`);
   return { tui, server };
@@ -444,6 +479,124 @@ test('pty: /paste capture accepts a bracketed block and keeps it as one attachme
   }
 });
 
+test('pty: a key pasted into the Add-key field is stored there, not in the chat composer', { skip: !HAS_SCRIPT }, async () => {
+  const { tui, server } = await startPty('mikuhost-pty-key-paste-');
+  const KEY = 'thk_ptyHarborKey0123456789abcdef';
+  try {
+    tui.write('/keys');
+    await sleep(300);
+    tui.write('\r');
+    await sleep(500);
+    assert.match(tui.output, /API KEY MANAGER/);
+
+    tui.write('a');
+    await sleep(400);
+    assert.match(tui.output, /Key name/);
+    tui.write('Harbor');
+    await sleep(200);
+    tui.write('\r');
+    await sleep(400);
+    assert.match(tui.output, /API key for "Harbor"/);
+
+    // A copied key arrives wrapped in bracketed-paste markers and usually
+    // carries a trailing newline from the copy.
+    tui.write(`\u001b[200~${KEY}\r\n\u001b[201~`);
+    await sleep(500);
+    // The key field is shown in clear on purpose: a swallowed or truncated
+    // character is impossible to spot behind bullets.
+    assert.ok(tui.output.includes(KEY), 'the key field must show the full key');
+    assert.match(tui.output, new RegExp(`${KEY.length} characters`));
+
+    tui.write('\r');
+    await sleep(1500);
+    // Saving verifies with a real completion against the provider.
+    assert.match(tui.output, /key accepted by TokenHarbor/);
+    assert.match(tui.output, /thk_•+/, 'the stored list entry stays masked');
+    const stored = JSON.parse(
+      fs.readFileSync(path.join(tui.fixtureDir.configDir, 'credentials.json'), 'utf8'),
+    );
+    const added = stored.keys.find((entry) => entry.name === 'Harbor');
+    assert.ok(added, 'the pasted key must be stored from the prompt field');
+    assert.equal(added.key, KEY, 'terminal whitespace must be stripped from the stored key');
+    assert.equal(added.provider, 'tokenharbor');
+
+    // The composer behind the panel stayed empty: Esc then a message sends only
+    // that message.
+    tui.write('\u001b');
+    await sleep(500);
+    tui.write('halo');
+    await sleep(600);
+    tui.write('\r');
+    await sleep(1000);
+    const content = lastUserContent(server);
+    assert.equal(content, 'halo');
+    assert.equal(content.includes(KEY), false, 'the key must never be sent as a chat message');
+  } finally {
+    await tui.stop();
+    await server.close();
+  }
+});
+
+test('pty: choosing a model switches the API key to that model provider', { skip: !HAS_SCRIPT }, async () => {
+  const { tui, server } = await startPty('mikuhost-pty-model-key-', {
+    keys: [
+      { id: 'k_nv', name: 'Personal', key: 'nvapi-pty-test-1234567890abcdef', provider: 'nvidia', createdAt: 1, status: 'ready' },
+      { id: 'k_th', name: 'Harbor', key: 'thk_ptyHarborKey0123456789abcdef', provider: 'tokenharbor', createdAt: 2, status: 'ready' },
+    ],
+  });
+  const readStore = () =>
+    JSON.parse(fs.readFileSync(path.join(tui.fixtureDir.configDir, 'credentials.json'), 'utf8'));
+  try {
+    assert.equal(readStore().activeId, 'k_nv');
+    tui.write('/models');
+    await sleep(300);
+    tui.write('\r');
+    await sleep(600);
+
+    const screen = tui.output;
+    assert.match(screen, /SELECT MODEL/);
+    // Both providers are reachable from the panel: the active key is NVIDIA.
+    assert.match(screen, /NVIDIA · unverified/);
+    assert.match(screen, /TokenHarbor · unverified/);
+    assert.match(screen, /DeepSeek V4\.1 Flash \(free\)/);
+
+    // Up from the first row wraps to the last: TokenHarbor's DeepSeek model.
+    tui.write('\u001b[A');
+    await sleep(300);
+    tui.write('\r');
+    await sleep(700);
+    assert.equal(readStore().activeId, 'k_th', 'the TokenHarbor key must be selected automatically');
+    assert.match(tui.output, /TokenHarbor key Harbor/);
+
+    // The next request is authenticated with the TokenHarbor key.
+    tui.write('halo');
+    await sleep(600);
+    tui.write('\r');
+    await sleep(1200);
+    assert.equal(server.raw.at(-1).headers.authorization, 'Bearer thk_ptyHarborKey0123456789abcdef');
+    assert.equal(server.raw.at(-1).body.model, 'deepseek-v4.1-flash:free');
+
+    // And the first row (GLM on NVIDIA) switches the key back.
+    tui.write('/models');
+    await sleep(300);
+    tui.write('\r');
+    await sleep(600);
+    tui.write('\r');
+    await sleep(700);
+    assert.equal(readStore().activeId, 'k_nv', 'the NVIDIA key must be selected automatically');
+
+    tui.write('halo lagi');
+    await sleep(600);
+    tui.write('\r');
+    await sleep(1200);
+    assert.equal(server.raw.at(-1).headers.authorization, 'Bearer nvapi-pty-test-1234567890abcdef');
+    assert.equal(server.raw.at(-1).body.model, 'z-ai/glm-5.3-flash');
+  } finally {
+    await tui.stop();
+    await server.close();
+  }
+});
+
 test('pty: bracketed 10,206 chars split into random reads is one attachment', { skip: !HAS_SCRIPT }, async () => {
   const { tui, server } = await startPty('mikuhost-pty-bracket-');
   try {
@@ -468,6 +621,216 @@ test('pty: bracketed 10,206 chars split into random reads is one attachment', { 
     tui.write('\r');
     await sleep(900);
     assertFullContent(lastUserContent(server), content, 'Cek bug ini');
+  } finally {
+    await tui.stop();
+    await server.close();
+  }
+});
+
+test('pty: settings → Unattended mode auto-approves everything and persists', { skip: !HAS_SCRIPT }, async () => {
+  const { tui, server } = await startPty('mikuhost-pty-unattended-');
+  const configFile = path.join(tui.fixtureDir.configDir, 'config.json');
+  try {
+    await sleep(400);
+    tui.write('/settings');
+    await sleep(400);
+    tui.write('\r');
+    assert.ok(await waitFor(() => /MIKUHOST SETTINGS/.test(tui.output)), `settings panel did not open:\n${tui.output.slice(-2000)}`);
+    assert.match(tui.output, /Leave the agent running/);
+
+    // Four rows: shell, file writes, sensitive reads, then the unattended switch.
+    for (let index = 0; index < 3; index += 1) {
+      tui.write('\u001b[B');
+      await sleep(120);
+    }
+    tui.write('\r');
+    assert.ok(
+      await waitFor(() => /ENABLE UNATTENDED MODE\?/.test(tui.output)),
+      `confirmation did not appear:\n${tui.output.slice(-2000)}`,
+    );
+    tui.write('y');
+    await sleep(500);
+
+    let saved = JSON.parse(fs.readFileSync(configFile, 'utf8'));
+    assert.equal(saved.permissions.shell, 'auto');
+    assert.equal(saved.permissions.fileWrite, 'auto');
+    assert.equal(saved.permissions.sensitiveRead, 'auto');
+    assert.match(tui.output, /nothing is asked/);
+
+    // Pressing Enter again turns it back off: approvals return.
+    tui.write('\r');
+    await sleep(500);
+    saved = JSON.parse(fs.readFileSync(configFile, 'utf8'));
+    assert.equal(saved.permissions.shell, 'ask');
+    assert.equal(saved.permissions.fileWrite, 'ask');
+    assert.equal(saved.permissions.sensitiveRead, 'ask');
+  } finally {
+    await tui.stop();
+    await server.close();
+  }
+});
+
+test('pty: /permissions shell auto asks first, then persists only that policy', { skip: !HAS_SCRIPT }, async () => {
+  const { tui, server } = await startPty('mikuhost-pty-permissions-');
+  const configFile = path.join(tui.fixtureDir.configDir, 'config.json');
+  try {
+    await sleep(400);
+    tui.write('/permissions shell auto');
+    await sleep(400);
+    tui.write('\r');
+    assert.ok(
+      await waitFor(() => /ENABLE UNATTENDED MODE\?/.test(tui.output)),
+      `the confirmation dialog did not appear:\n${tui.output.slice(-2000)}`,
+    );
+    let saved = JSON.parse(fs.readFileSync(configFile, 'utf8'));
+    assert.equal(saved.permissions.shell, 'ask', 'nothing changes before the confirmation');
+
+    tui.write('y');
+    await sleep(600);
+    saved = JSON.parse(fs.readFileSync(configFile, 'utf8'));
+    assert.equal(saved.permissions.shell, 'auto');
+    assert.equal(saved.permissions.fileWrite, 'ask');
+    assert.equal(saved.permissions.sensitiveRead, 'ask');
+  } finally {
+    await tui.stop();
+    await server.close();
+  }
+});
+
+test('pty: the approval dialog shows the whole command, wrapped, not cut off', { skip: !HAS_SCRIPT }, async () => {
+  const command = 'echo "=== src/lib (jumlah file) ==="; ls src/lib | wc -l; ls src/lib/*.js 2>/dev/null | head -5';
+  const { tui, server } = await startPty('mikuhost-pty-approval-', {
+    toolCall: { name: 'run_command', arguments: { command } },
+  });
+  try {
+    await sleep(400);
+    tui.write('cek jumlah file di src/lib');
+    await sleep(300);
+    tui.write('\r');
+    assert.ok(
+      await waitFor(() => /SHELL EXECUTION REQUEST/.test(tui.output)),
+      `the approval dialog did not appear:\n${tui.output.slice(-2000)}`,
+    );
+    const screen = tui.output;
+    // The command is longer than the dialog line: it must wrap, and every part
+    // of it (including the /dev/null redirect) has to be readable.
+    assert.match(screen, /Command:/);
+    assert.ok(screen.includes('echo "=== src/lib (jumlah file) ==="'), 'the start of the command must be visible');
+    assert.ok(screen.includes('2>/dev/null | head -5'), 'the end of the command must be visible');
+    assert.match(screen, /ALWAYS ASK · read-only/);
+
+    tui.write('d');
+    await sleep(900);
+    assert.equal(tui.child.exitCode, null, 'the TUI must stay alive after denying');
+  } finally {
+    await tui.stop();
+    await server.close();
+  }
+});
+
+test('pty: /undo restores the file the agent just overwrote', { skip: !HAS_SCRIPT }, async () => {
+  const { tui, server } = await startPty('mikuhost-pty-undo-', {
+    toolCall: { name: 'write_file', arguments: { path: 'catatan.txt', content: 'ditulis agen\n' } },
+  });
+  const target = path.join(tui.fixtureDir.workspace, 'catatan.txt');
+  try {
+    fs.writeFileSync(target, 'isi asli\n');
+    await sleep(400);
+    tui.write('tulis catatan');
+    await sleep(300);
+    tui.write('\r');
+    assert.ok(
+      await waitFor(() => /FILE CHANGE REQUEST/.test(tui.output)),
+      `the write approval never appeared:\n${tui.output.slice(-2000)}`,
+    );
+    tui.write('a');
+    assert.ok(
+      await waitFor(() => fs.existsSync(target) && fs.readFileSync(target, 'utf8') === 'ditulis agen\n'),
+      'the agent did not write the file',
+    );
+    assert.ok(await waitFor(() => /Completed in/.test(tui.output)), 'the turn never finished');
+
+    tui.write('/undo');
+    await sleep(300);
+    tui.write('\r');
+    assert.ok(
+      await waitFor(() => fs.readFileSync(target, 'utf8') === 'isi asli\n'),
+      `the original content was not restored:\n${tui.output.slice(-2000)}`,
+    );
+    assert.match(tui.output, /Restored catatan\.txt to the version before write_file/);
+    assert.match(tui.output, /Undo: restored catatan\.txt/);
+    assert.equal(tui.child.exitCode, null, 'the TUI must stay alive');
+  } finally {
+    await tui.stop();
+    await server.close();
+  }
+});
+
+test('pty: a resumed turn that never got an answer is flagged and /continue finishes it', { skip: !HAS_SCRIPT }, async () => {
+  const server = await startMockServer();
+  const fixtureDir = fixture('mikuhost-pty-continue-', server.url);
+  const dbFile = path.join(fixtureDir.configDir, 'sessions.db');
+  const store = openSessionStore({ file: dbFile });
+  const seeded = store.createSession({
+    title: 'Turn terputus',
+    model: 'z-ai/glm-5.3-flash',
+    workspace: fixtureDir.workspace,
+  });
+  store.appendMessage(seeded.id, { role: 'user', content: 'Lanjutkan perbaikan reconnect' });
+  store.close();
+  const tui = launch(fixtureDir, ['--session', seeded.id]);
+  try {
+    assert.ok(
+      await waitFor(() => /The last turn did not finish/.test(tui.output)),
+      `the unfinished turn was not reported:\n${tui.output.slice(-2000)}`,
+    );
+    assert.match(tui.output, /\/continue to resume/);
+
+    tui.write('/continue');
+    await sleep(300);
+    tui.write('\r');
+    assert.ok(await waitFor(() => /Completed in/.test(tui.output)), 'the resumed turn never finished');
+
+    const request = server.requests.at(-1);
+    const userMessages = request.messages.filter((message) => message.role === 'user');
+    assert.equal(userMessages.length, 1, 'the prompt is not sent twice');
+    assert.equal(userMessages[0].content, 'Lanjutkan perbaikan reconnect');
+
+    const check = openSessionStore({ file: dbFile });
+    const messages = check.getMessages(seeded.id);
+    check.close();
+    assert.deepEqual(
+      messages.map((message) => message.role),
+      ['user', 'assistant'],
+      'the resumed answer is appended, the prompt is not duplicated',
+    );
+    assert.equal(tui.child.exitCode, null);
+  } finally {
+    await tui.stop();
+    await server.close();
+  }
+});
+
+test('pty: /undo and /continue explain themselves when there is nothing to do', { skip: !HAS_SCRIPT }, async () => {
+  const { tui, server } = await startPty('mikuhost-pty-nothing-');
+  try {
+    await sleep(400);
+    tui.write('/undo list');
+    await sleep(250);
+    tui.write('\r');
+    assert.ok(
+      await waitFor(() => /Nothing to undo in this session/.test(tui.output)),
+      `undo did not report an empty stack:\n${tui.output.slice(-2000)}`,
+    );
+
+    tui.write('/continue');
+    await sleep(250);
+    tui.write('\r');
+    assert.ok(
+      await waitFor(() => /No unfinished turn to continue/.test(tui.output)),
+      `continue did not report a finished conversation:\n${tui.output.slice(-2000)}`,
+    );
+    assert.equal(tui.child.exitCode, null);
   } finally {
     await tui.stop();
     await server.close();

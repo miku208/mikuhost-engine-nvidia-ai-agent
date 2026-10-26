@@ -4,6 +4,7 @@ import path from 'node:path';
 import {
   buildHeaderLines,
   buildChatLines,
+  wrapCommandLines,
 } from '../src/ui/text-layout.mjs';
 import { buildComposerLayout, maxComposerLines, composerAttachmentRows } from '../src/ui/composer-layout.mjs';
 import { viewportMetrics, anchorOffset, scrollBy, shouldShowNewOutput } from '../src/ui/viewport.mjs';
@@ -251,4 +252,26 @@ test('attachments: stored intact in the session and re-expanded for the model', 
     cleanupDir(dir);
     cleanupDir(root);
   }
+});
+
+test('ui: approval preview wraps a long command instead of truncating it', () => {
+  const command =
+    'echo "=== src/lib (jumlah file) ==="; ls src/lib | wc -l; ls src/lib/*.js 2>/dev/null | head -5';
+  const { lines, hidden } = wrapCommandLines(command, 40, 10);
+  assert.ok(lines.length > 1, 'the command must wrap across lines');
+  assert.equal(hidden, 0);
+  assert.ok(
+    lines.every((line) => line.length <= 40),
+    `every wrapped line must fit: ${JSON.stringify(lines)}`,
+  );
+  // Nothing may be dropped while wrapping: the words all survive.
+  assert.equal(
+    lines.join(' ').replace(/\s+/g, ' ').trim(),
+    command.replace(/\s+/g, ' ').trim(),
+  );
+
+  // A command too long for the dialog says how much is hidden.
+  const huge = wrapCommandLines(`echo ${'x'.repeat(500)}`, 40, 4);
+  assert.equal(huge.lines.length, 4);
+  assert.ok(huge.hidden > 0);
 });

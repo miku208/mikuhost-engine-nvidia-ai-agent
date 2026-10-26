@@ -118,6 +118,11 @@ export class SessionManager {
     return stored;
   }
 
+  /**
+   * Destructive rewrite of the stored transcript (new ids for every row).
+   * Compaction must NOT use this: it builds a context view per request instead,
+   * so the conversation a user can scroll back through is never shortened.
+   */
   replaceMessages(messages) {
     if (!this.session) return [];
     this.messages = this.store.replaceMessages(this.session.id, messages);

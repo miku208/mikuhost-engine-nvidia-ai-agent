@@ -43,7 +43,7 @@ export function PanelHint({ children, color = theme.dim }) {
   return h(Text, { color, wrap: 'wrap' }, children);
 }
 
-export function PanelPrompt({ label, value, masked = false, cursor = null }) {
+export function PanelPrompt({ label, value, masked = false, cursor = null, hint = null }) {
   const shown = masked ? '•'.repeat(String(value ?? '').length) : String(value ?? '');
   const hasCursor = Number.isInteger(cursor);
   return h(
@@ -58,6 +58,7 @@ export function PanelPrompt({ label, value, masked = false, cursor = null }) {
       hasCursor ? h(Text, { backgroundColor: theme.accent, color: '#0d1117' }, shown.slice(cursor, cursor + 1) || ' ') : null,
       hasCursor ? h(Text, { color: theme.text }, shown.slice(cursor + 1)) : null,
     ),
+    hint ? h(Text, { color: theme.faint, wrap: 'wrap' }, hint) : null,
     h(Text, { color: theme.faint }, '[Enter] Confirm   [Esc] Cancel'),
   );
 }
