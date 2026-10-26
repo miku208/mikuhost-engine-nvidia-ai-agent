@@ -741,7 +741,7 @@ Exit codes: `0` success, `1` runtime/doctor failure, `2` usage error.
 
 ```bash
 npm install
-npm test          # 204 tests, no network access required
+npm test          # 212 tests, no network access required
 ```
 
 The suite covers workspace/symlink escapes, sensitive files, the shell policy
@@ -793,6 +793,7 @@ src/ui/                   Ink app, panels, dialogs, setup wizard, layout
 src/paste/                pasted-text attachments, language detection, chips
 src/reasoning/            provider reasoning field adapter and UI settings
 src/projects/             project scanner
+src/branding/             encrypted developer credit (credit.enc) + loader
 tests/                    node:test suite
 docs/preview.png          README preview (generated from the real TUI)
 ```
@@ -811,6 +812,35 @@ npm publish
 `package.json` → `files` keeps the package to `bin`, `src`, `docs`,
 `README.md` and `LICENSE`. The preview is rendered from the real TUI, so commit
 `docs/preview.png` together with the README when pushing to GitHub.
+
+### Branding and developer credit
+
+Every `.mjs` file under `src/`, `bin/`, `scripts/` and `tests/` starts with the
+same two-line notice (the test suite fails if one is missing or duplicated):
+
+```
+// MikuHost Agent — © 2026 miku208 — All rights reserved.
+// Not for resale. This notice and the encrypted credit file must stay in place.
+```
+
+The product name and the author shown by `--help` and in the TUI header are **not**
+hardcoded in the sources: they are decrypted at runtime from
+`src/branding/credit.enc` (AES-256-GCM). Delete that file, or change a byte in it,
+and every command exits `1` with *"the developer credit file is missing or
+unreadable"* — a build without its author is not a valid build.
+
+Honest limitation: an offline CLI must ship its decryption key, so the key in
+`src/branding/credit.mjs` is XOR-masked and split rather than secret. This raises
+the cost of a casual "strip the credit" edit; it cannot stop a determined reader.
+If you need real protection, keep the credit check together with a signed release
+or move distribution behind a service you control.
+
+To work on the engine without any of this, check out the plain snapshot tag:
+
+```bash
+git checkout plain-1.3.0     # unencrypted, unwatermarked sources at 1.3.0
+git checkout main            # back to the protected line
+```
 
 ## VPS and Termux notes
 

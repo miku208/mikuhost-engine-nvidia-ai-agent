@@ -1,3 +1,5 @@
+// MikuHost Agent — © 2026 miku208 — All rights reserved.
+// Not for resale. This notice and the encrypted credit file must stay in place.
 import { resolveToolPath, readTextFile, sliceLines, numberLines, relativeInside } from './util.mjs';
 import { classifySensitive } from '../security/sensitive-files.mjs';
 

@@ -1,3 +1,5 @@
+// MikuHost Agent — © 2026 miku208 — All rights reserved.
+// Not for resale. This notice and the encrypted credit file must stay in place.
 import { truncate } from '../util/text.mjs';
 import { composePromptWithAttachments } from '../paste/attachments.mjs';
 

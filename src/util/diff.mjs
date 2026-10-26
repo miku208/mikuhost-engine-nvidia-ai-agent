@@ -1,3 +1,5 @@
+// MikuHost Agent — © 2026 miku208 — All rights reserved.
+// Not for resale. This notice and the encrypted credit file must stay in place.
 /**
  * Minimal LCS-based line diff. Deliberately small: it exists to show a human
  * what a write/edit will change before approval, not to produce git-applicable

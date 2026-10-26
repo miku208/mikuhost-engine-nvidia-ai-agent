@@ -1,3 +1,5 @@
+// MikuHost Agent — © 2026 miku208 — All rights reserved.
+// Not for resale. This notice and the encrypted credit file must stay in place.
 import fs from 'node:fs';
 import { resolveToolPath, readTextFile, relativeInside, ToolError } from './util.mjs';
 import { diffLines } from '../util/diff.mjs';

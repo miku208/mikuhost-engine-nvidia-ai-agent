@@ -1,3 +1,5 @@
+// MikuHost Agent — © 2026 miku208 — All rights reserved.
+// Not for resale. This notice and the encrypted credit file must stay in place.
 /**
  * Public programmatic surface for MikuHost Agent.
  * The CLI uses the same modules; they are exported so the agent can be

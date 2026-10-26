@@ -1,3 +1,5 @@
+// MikuHost Agent — © 2026 miku208 — All rights reserved.
+// Not for resale. This notice and the encrypted credit file must stay in place.
 export function clampOffset(offset, maxScroll) {
   const max = Math.max(0, Number(maxScroll) || 0);
   return Math.max(0, Math.min(max, Number(offset) || 0));

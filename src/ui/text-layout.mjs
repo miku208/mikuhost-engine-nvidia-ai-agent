@@ -1,6 +1,9 @@
+// MikuHost Agent — © 2026 miku208 — All rights reserved.
+// Not for resale. This notice and the encrypted credit file must stay in place.
 import { theme, SYMBOLS } from './theme.mjs';
 import { formatDuration } from '../util/text.mjs';
 import { formatAttachmentCard, sanitizeForDisplay } from '../paste/attachments.mjs';
+import { agentName } from '../branding/credit.mjs';
 
 /** Approximate terminal display width (CJK/emoji count as 2 columns). */
 export function displayWidth(text) {
@@ -122,7 +125,7 @@ export function buildHeaderLines({ model = '—', workspace = '—', session = '
   const contentWidth = Math.max(20, width - 4);
   const rule = '─'.repeat(contentWidth);
   return [
-    { text: `  ${SYMBOLS.bullet} MIKUHOST AGENT  ·  Multi-Model AI Coding Assistant`, color: theme.accent, bold: true },
+    { text: `  ${SYMBOLS.bullet} ${agentName().toUpperCase()}  ·  Multi-Model AI Coding Assistant`, color: theme.accent, bold: true },
     { text: `  Model      ${model}`, color: theme.dim },
     { text: `  Workspace  ${workspace}`, color: theme.dim },
     { text: `  Session    ${session}`, color: theme.dim },

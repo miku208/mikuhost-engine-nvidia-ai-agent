@@ -1,6 +1,10 @@
+// MikuHost Agent — © 2026 miku208 — All rights reserved.
+// Not for resale. This notice and the encrypted credit file must stay in place.
+import { creditFooter, agentName } from '../branding/credit.mjs';
+
 export const COMMANDS = ['doctor', 'keys', 'providers', 'models', 'sessions', 'help', 'version'];
 
-export const USAGE = `MikuHost Agent — AI coding agent for the terminal
+export const USAGE = `${agentName()} — AI coding agent for the terminal
 
 Usage:
   mikuhost                          Start a NEW session (first run opens setup)
@@ -47,6 +51,8 @@ Environment:
   MIKUHOST_ENCRYPTION_KEY Passphrase used to encrypt credentials.json
   MIKUHOST_MOUSE=0        Disable mouse click support in the TUI
   NO_COLOR                Disable colours
+
+${creditFooter()}
 `;
 
 const VALUE_FLAGS = new Set(['workspace', 'model', 'base-url', 'session', 'provider']);

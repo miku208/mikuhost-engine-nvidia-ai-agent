@@ -1,3 +1,5 @@
+// MikuHost Agent — © 2026 miku208 — All rights reserved.
+// Not for resale. This notice and the encrypted credit file must stay in place.
 /**
  * Small, pure helpers for the composer selection model. Keeping the decisions
  * here makes keyboard/mouse behaviour testable without rendering Ink.

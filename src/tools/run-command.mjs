@@ -1,3 +1,5 @@
+// MikuHost Agent — © 2026 miku208 — All rights reserved.
+// Not for resale. This notice and the encrypted credit file must stay in place.
 import fs from 'node:fs';
 import { spawn } from 'node:child_process';
 import { resolveToolPath, truncateOutput, relativeInside, ToolError } from './util.mjs';

@@ -1,3 +1,5 @@
+// MikuHost Agent — © 2026 miku208 — All rights reserved.
+// Not for resale. This notice and the encrypted credit file must stay in place.
 /**
  * Small but strict JSON-schema validator for tool inputs. Supports the subset
  * used by the tool definitions (object/string/number/integer/boolean/array,

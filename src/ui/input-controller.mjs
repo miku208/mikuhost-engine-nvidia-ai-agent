@@ -1,3 +1,5 @@
+// MikuHost Agent — © 2026 miku208 — All rights reserved.
+// Not for resale. This notice and the encrypted credit file must stay in place.
 import { PassThrough } from 'node:stream';
 import { StringDecoder } from 'node:string_decoder';
 import { createBracketedPasteCapture } from '../paste/attachments.mjs';

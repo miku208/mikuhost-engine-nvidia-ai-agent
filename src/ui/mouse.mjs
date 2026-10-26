@@ -1,3 +1,5 @@
+// MikuHost Agent — © 2026 miku208 — All rights reserved.
+// Not for resale. This notice and the encrypted credit file must stay in place.
 export const MOUSE_ENABLE = '\u001b[?1000h\u001b[?1006h';
 export const MOUSE_DISABLE = '\u001b[?1000l\u001b[?1006l';
 

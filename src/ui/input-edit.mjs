@@ -1,3 +1,5 @@
+// MikuHost Agent — © 2026 miku208 — All rights reserved.
+// Not for resale. This notice and the encrypted credit file must stay in place.
 const CONTROL_CHARS = /[\u0000-\u0008\u000b\u000c\u000e-\u001f]/g;
 const META_BACKSPACE = /^\u001b+[\u007f\u0008]+$/;
 const PASTE_MARKERS = /\u001b\[20[01]~|\[20[01]~/g;

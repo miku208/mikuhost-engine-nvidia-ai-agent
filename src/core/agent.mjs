@@ -1,3 +1,5 @@
+// MikuHost Agent — © 2026 miku208 — All rights reserved.
+// Not for resale. This notice and the encrypted credit file must stay in place.
 import { ProviderError, ERROR_CODES } from '../providers/errors.mjs';
 import { createProvider, providerName, resolveProviderId } from '../providers/catalog.mjs';
 import { ToolRegistry } from '../tools/registry.mjs';

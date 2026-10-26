@@ -1,6 +1,9 @@
+// MikuHost Agent — © 2026 miku208 — All rights reserved.
+// Not for resale. This notice and the encrypted credit file must stay in place.
 import { Box, Text } from 'ink';
 import { h } from '../h.mjs';
 import { theme, SYMBOLS } from '../theme.mjs';
+import { agentName } from '../../branding/credit.mjs';
 
 function InfoRow({ label, value, color = theme.text }) {
   return h(
@@ -24,7 +27,7 @@ export function Header({ model, workspace, session, status, statusColor, compact
       h(
         Box,
         { justifyContent: 'space-between' },
-        h(Text, { bold: true, color: theme.accent }, 'MIKUHOST AGENT'),
+        h(Text, { bold: true, color: theme.accent }, agentName().toUpperCase()),
         h(Text, { color: statusColor ?? theme.green }, `${dot} ${status}`),
       ),
       compact ? null : h(Text, { color: theme.dim }, 'Multi-Model AI Coding Assistant'),

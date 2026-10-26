@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+// MikuHost Agent — © 2026 miku208 — All rights reserved.
+// Not for resale. This notice and the encrypted credit file must stay in place.
 /**
  * MikuHost Agent — global CLI entrypoint.
  * `npm link` exposes this file as the `mikuhost` command.
@@ -15,6 +17,16 @@ for (const stream of [process.stdout, process.stderr]) {
   stream.on('error', (error) => {
     if (error?.code === 'EPIPE') process.exit(0);
   });
+}
+
+// A distribution that lost its encrypted credit is not a valid build: stop
+// before any command runs instead of silently stripping the author.
+try {
+  const { assertCredit } = await import('../src/branding/credit.mjs');
+  assertCredit();
+} catch (error) {
+  process.stderr.write(`\n${error?.message ?? error}\n`);
+  process.exit(1);
 }
 
 const { main } = await import('../src/cli/commands.mjs');

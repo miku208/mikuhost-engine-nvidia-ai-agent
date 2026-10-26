@@ -1,3 +1,5 @@
+// MikuHost Agent — © 2026 miku208 — All rights reserved.
+// Not for resale. This notice and the encrypted credit file must stay in place.
 import { validateSchema, ToolValidationError } from './schema.mjs';
 import { ToolError, truncateOutput, relativeInside } from './util.mjs';
 import { LIMITS } from '../security/workspace.mjs';
