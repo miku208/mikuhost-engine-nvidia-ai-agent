@@ -226,6 +226,18 @@ Mouse wheel scrolls the conversation. Every feature remains keyboard-accessible.
 The transcript stays anchored on the line you were reading while a reply
 streams in; new output below the fold is indicated instead of yanking the view.
 
+### Permanent sidebar
+
+From 92 columns wide, a rail stays pinned to the left edge for the whole run:
+session title and message count, active model and provider, workspace and shell
+policy, the last tool calls of this session (`✓`/`✗`, with duration and how
+many older ones are hidden), and the token count.
+
+The rail is layout, not a panel: no key opens or closes it, it never covers the
+conversation, and it is not clickable. Narrower terminals drop it so the
+transcript keeps the width — everything it shows is still available with
+`/status`.
+
 ## Pasting text
 
 Paste with the terminal's normal shortcut (`Ctrl+Shift+V`, Termux long-press

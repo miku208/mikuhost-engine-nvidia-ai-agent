@@ -7,6 +7,8 @@ import {
   wrapCommandLines,
 } from '../src/ui/text-layout.mjs';
 import { buildComposerLayout, maxComposerLines, composerAttachmentRows } from '../src/ui/composer-layout.mjs';
+import { Box, Text } from 'ink';
+import { Sidebar, sidebarWidth } from '../src/ui/components/sidebar.mjs';
 import { viewportMetrics, anchorOffset, scrollBy, shouldShowNewOutput } from '../src/ui/viewport.mjs';
 import {
   PASTE_DEFAULTS,
@@ -274,4 +276,81 @@ test('ui: approval preview wraps a long command instead of truncating it', () =>
   const huge = wrapCommandLines(`echo ${'x'.repeat(500)}`, 40, 4);
   assert.equal(huge.lines.length, 4);
   assert.ok(huge.hidden > 0);
+});
+
+/**
+ * Flatten a React element tree down to its visible text. Ink components need a
+ * mounted renderer (they use hooks), so they are treated as transparent
+ * containers and only the app's own components are expanded.
+ */
+function elementText(node) {
+  if (node === null || node === undefined || node === false) return '';
+  if (typeof node === 'string' || typeof node === 'number') return String(node);
+  if (Array.isArray(node)) return node.map(elementText).join('');
+  if (typeof node.type === 'function' && node.type !== Box && node.type !== Text) {
+    return elementText(node.type(node.props));
+  }
+  return elementText(node.props?.children);
+}
+
+test('ui: the sidebar is permanent furniture sized by the terminal', () => {
+  // No room → no rail. It must never squeeze the transcript on a small screen.
+  assert.equal(sidebarWidth(40), 0);
+  assert.equal(sidebarWidth(80), 0);
+  assert.equal(sidebarWidth(91), 0);
+  assert.equal(sidebarWidth(92), 22);
+  assert.equal(sidebarWidth(99), 22);
+  assert.equal(sidebarWidth(100), 26);
+  assert.equal(sidebarWidth(119), 26);
+  assert.equal(sidebarWidth(120), 30);
+
+  const text = elementText(
+    Sidebar({
+      width: 26,
+      height: 24,
+      title: 'cek file',
+      messageCount: 88,
+      model: 'GLM 5.3 Flash',
+      provider: 'NVIDIA',
+      workspace: '/root/mikuhost-agent',
+      permission: 'ask',
+      tokenTotal: 1234,
+      tools: [
+        { id: 'a', name: 'run_command', ok: true, durationMs: 1200 },
+        { id: 'b', name: 'read_file', ok: false, durationMs: 40 },
+        { id: 'c', name: 'list_directory', running: true },
+      ],
+    }),
+  );
+
+  assert.match(text, /SESSION/);
+  assert.match(text, /cek file/);
+  assert.match(text, /88 messages/);
+  assert.match(text, /MODEL/);
+  assert.match(text, /GLM 5.3 Flash/);
+  assert.match(text, /NVIDIA/);
+  assert.match(text, /WORKSPACE/);
+  assert.match(text, /shell ASK/);
+  assert.match(text, /TOOLS/);
+  assert.match(text, /run_command/);
+  assert.match(text, /read_file/);
+  assert.match(text, /list_directory/);
+  assert.match(text, /1234/);
+  // Children are passed as props, so a wrong prop name would leak "undefined".
+  assert.equal(text.includes('undefined'), false);
+  // Nothing in the rail closes it: it has no toggle affordance at all.
+  assert.equal(/Esc|close/i.test(text), false);
+});
+
+test('ui: the sidebar reports how many tool calls predate the visible ones', () => {
+  const tools = Array.from({ length: 10 }, (_, index) => ({
+    id: String(index),
+    name: `tool_${index}`,
+    ok: true,
+  }));
+  const text = elementText(Sidebar({ width: 26, height: 40, tools, maxTools: 4 }));
+  assert.match(text, /tool_9/);
+  assert.match(text, /tool_6/);
+  assert.doesNotMatch(text, /tool_5/);
+  assert.match(text, /\+6 earlier/);
 });

@@ -36,6 +36,7 @@ import { Header } from './components/header.mjs';
 import { ActivityEngine, phaseStatusLabel } from './components/activity.mjs';
 import { PromptInput } from './components/prompt-input.mjs';
 import { StatusBar } from './components/status-bar.mjs';
+import { Sidebar, sidebarWidth } from './components/sidebar.mjs';
 import { ApprovalDialog } from './components/approval-dialog.mjs';
 import { ErrorDialog } from './components/error-dialog.mjs';
 import { SessionsPanel } from './panels/sessions.mjs';
@@ -1230,22 +1231,26 @@ function App({
   const reasoningSelected = selection?.kind === 'reasoning';
   const attachmentRowsPreview = attachmentWindow(attachments, maxAttachmentRows(rows), selectedAttachmentId);
   const attachmentRows = attachmentRowsPreview.items.length + (attachmentRowsPreview.hidden ? 1 : 0);
+  // The rail is permanent furniture: it is never toggled by a key, only hidden
+  // when the terminal simply has no room for it.
+  const railWidth = sidebarWidth(columns);
+  const mainWidth = columns - railWidth;
   const composerTextRows = composerTextLines(rows, attachmentRows);
   const composerLayout = useMemo(
     () =>
       buildComposerLayout({
         value: input,
         cursor,
-        width: Math.max(12, columns - 4),
+        width: Math.max(12, mainWidth - 4),
         maxLines: composerTextRows,
       }),
-    [input, cursor, columns, composerTextRows],
+    [input, cursor, mainWidth, composerTextRows],
   );
   // The border belongs to the composer, so it counts towards the fixed height.
   const composerHeight = composerLayout.lines.length + attachmentRows + COMPOSER_BORDER_ROWS;
   // The composer owns its border, so the status bar no longer draws a divider.
   const statusHeight = tiny ? 1 : 2;
-  const chatWidth = Math.max(20, columns - 2);
+  const chatWidth = Math.max(20, columns - (railWidth ? railWidth + 2 : 2));
   const sessionTitle = envRef.current.session.title;
   const headerLines = useMemo(
     () =>
@@ -1267,6 +1272,23 @@ function App({
     // reasoningMode re-reads the saved preference after /reasoning changes it.
     [liveReasoning, config, reasoningMode],
   );
+  // The rail mirrors the session itself: completed tool calls come from the
+  // saved transcript (so reopening a session shows the same history), and the
+  // ones still running are layered on top from the activity list.
+  const railTools = useMemo(() => {
+    const done = messages
+      .filter((message) => message.role === 'tool')
+      .map((message) => ({
+        id: message.id,
+        name: message.toolName ?? 'tool',
+        ok: message.meta?.ok !== false,
+        durationMs: Number(message.meta?.durationMs) || 0,
+      }));
+    const running = activities
+      .filter((activity) => activity.kind === 'tool' && activity.status === 'running')
+      .map((activity) => ({ id: `live-${activity.id}`, name: activity.toolName ?? 'tool', ok: null, running: true }));
+    return [...done, ...running];
+  }, [messages, activities]);
   const chatLines = useMemo(() => {
     const visibleMessages = viewFromId
       ? messages.slice(Math.max(0, messages.findIndex((message) => message.id === viewFromId) + 1))
@@ -1397,6 +1419,8 @@ function App({
       return true;
     }
     if (mouse.motion || mouse.release) return true;
+    // The rail is not a panel and has no hidden actions; taps there do nothing.
+    if (railWidth && mouse.x <= railWidth) return true;
 
     const row = Math.max(0, Math.min(rows - 1, mouse.y - 1));
     if (row >= rows - 1) {
@@ -2358,7 +2382,7 @@ function App({
         sessions,
         selected: Math.min(panelSelection, Math.max(0, sessions.length - 1)),
         currentId: envRef.current.session.id,
-        width: columns - 4,
+        width: mainWidth - 4,
         confirming,
       }),
     );
@@ -2370,7 +2394,7 @@ function App({
         models: modelsForPanel(),
         selected: Math.min(panelSelection, Math.max(0, modelsForPanel().length - 1)),
         activeId: envRef.current.runtime.activeModel,
-        width: columns - 4,
+        width: mainWidth - 4,
         statusMessage: modelsMessage,
         refreshError: null,
       }),
@@ -2382,7 +2406,7 @@ function App({
       h(KeysPanel, {
         keys: credentials.list(),
         selected: Math.min(panelSelection, Math.max(0, credentials.list().length - 1)),
-        width: columns - 4,
+        width: mainWidth - 4,
         prompt,
         testMessage: keysMessage,
         confirming,
@@ -2395,7 +2419,7 @@ function App({
       h(SettingsPanel, {
         permissions,
         selected: Math.min(panelSelection, SETTINGS_ROW_KEYS.length - 1),
-        width: columns - 4,
+        width: mainWidth - 4,
         rootWarning: isRootUser(),
         confirming: permissionWarning,
       }),
@@ -2407,7 +2431,7 @@ function App({
       h(ProjectsPanel, {
         projects,
         selected: Math.min(panelSelection, Math.max(0, projects.length - 1)),
-        width: columns - 4,
+        width: mainWidth - 4,
         focused: focus,
         truncated: projectMeta.truncated,
         durationMs: projectMeta.durationMs,
@@ -2434,16 +2458,16 @@ function App({
     );
   }
 
-  return h(
+  const mainColumn = h(
     Box,
-    { flexDirection: 'column', height: rows, width: columns },
+    { flexDirection: 'column', height: rows, width: mainWidth, flexShrink: 0 },
     contentRegion,
     showActivity
       ? h(ActivityEngine, {
           frame,
           elapsedMs,
           activities,
-          width: columns,
+          width: mainWidth,
           phase,
           maxActivities: activityLimit,
         })
@@ -2451,7 +2475,7 @@ function App({
     h(PromptInput, {
       value: input,
       cursor,
-      width: columns,
+      width: mainWidth,
       selectedAttachmentId,
       maxLines: composerTextRows,
       captureActive: Boolean(pasteCapture),
@@ -2486,7 +2510,7 @@ function App({
       frame,
       elapsedMs,
       lastActivity,
-      width: columns,
+      width: mainWidth,
       panel,
       compact,
       tiny,
@@ -2500,6 +2524,26 @@ function App({
       tokenTotal,
       phase,
     }),
+  );
+
+  return h(
+    Box,
+    { flexDirection: 'row', height: rows, width: columns },
+    railWidth
+      ? h(Sidebar, {
+          width: railWidth,
+          height: rows,
+          title: envRef.current.session.title,
+          messageCount: messages.length,
+          model: modelLabel,
+          provider: providerName(envRef.current.runtime.providerId),
+          workspace: workspaceLabel,
+          permission: permissions.shell,
+          tokenTotal,
+          tools: railTools,
+        })
+      : null,
+    mainColumn,
   );
 }
 
