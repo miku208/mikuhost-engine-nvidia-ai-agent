@@ -142,7 +142,7 @@ The commands you will reach for most, inside the TUI:
 | `/workspace <path>` · `/project <name>` | change workspace / focus a project |
 | `/permissions shell allow` | run safe commands without asking each time |
 | `/settings` | all permission settings |
-| `/undo` · `/undo list` | revert the agent's last file change |
+| `/undo` · `/undo list` | revert the agent's last file change; `/undo turn` reverts every file the last turn changed |
 | `/continue` | finish a turn that was interrupted (SSH drop, crash) |
 | `/help` | the complete list |
 
@@ -182,7 +182,8 @@ writing or running a command.
   AES-256-GCM envelope (scrypt-derived key) — record the passphrase, because
   without it the file cannot be opened.
 - **`/undo`** snapshots files before each change (the last 40 edits), so agent
-  edits are reversible without git.
+  edits are reversible without git. `/undo turn` reverts a whole turn at once,
+  skipping — not overwriting — any file you edited yourself afterwards.
 
 *The reasoning behind each of these, and exactly what is transmitted per turn:
 PANDUAN §7.*

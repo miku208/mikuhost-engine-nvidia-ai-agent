@@ -54,6 +54,18 @@ export class AgentRuntime {
     this.toolModes = new Map();
     /** Session id whose compaction was already announced, so it warns once. */
     this.compactionNoticeFor = null;
+    /** Turns started by this runtime; feeds the per-turn snapshot id. */
+    this.turnSeq = 0;
+  }
+
+  /**
+   * A fresh id per turn. Every snapshot a turn takes carries it, so the whole
+   * turn can be reverted as one unit. The timestamp keeps ids unique across
+   * runs of the same session, where the counter alone would repeat.
+   */
+  nextTurnId() {
+    this.turnSeq += 1;
+    return `t_${Date.now().toString(36)}_${this.turnSeq.toString(36)}`;
   }
 
   setApprovalHandler(handler) {
@@ -258,13 +270,14 @@ export class AgentRuntime {
     return this.config?.get?.().permissions ?? { shell: 'ask', fileWrite: 'ask', sensitiveRead: 'ask' };
   }
 
-  buildRegistry({ signal } = {}) {
+  buildRegistry({ signal, turnId = null } = {}) {
     return new ToolRegistry({
       workspace: this.workspace,
       config: this.config,
       isRootUser: this.isRoot,
       session: this.session,
       history: this.history,
+      turnId,
       requestApproval: async (request) => {
         if (!this.approvalHandler) {
           this.emit({ type: 'warning', message: 'Approval required but no interactive handler is available.' });
@@ -332,7 +345,7 @@ export class AgentRuntime {
     const entry = this.credentialFor(this.providerId);
     const providerId = this.credentials?.providerOf?.(entry) ?? this.providerId;
     const provider = this.providerFor(entry);
-    const registry = this.buildRegistry({ signal });
+    const registry = this.buildRegistry({ signal, turnId: this.nextTurnId() });
 
     this.session.ensure({
       model,

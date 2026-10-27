@@ -53,9 +53,10 @@ function chunked(text, seed = 11, min = 1, max = 4096) {
   return chunks;
 }
 
-async function startMockServer({ toolCall = null } = {}) {
+async function startMockServer({ toolCall = null, toolCalls = null } = {}) {
   const requests = [];
   const raw = [];
+  const calls = toolCalls ?? (toolCall ? [toolCall] : []);
   const server = http.createServer((req, res) => {
     let body = '';
     req.on('data', (chunk) => {
@@ -71,23 +72,22 @@ async function startMockServer({ toolCall = null } = {}) {
       requests.push(parsed);
       raw.push({ headers: { ...req.headers }, body: parsed });
       res.writeHead(200, { 'Content-Type': 'text/event-stream' });
-      // First turn may ask for one tool call, so an approval dialog can be
-      // exercised; after that the model answers normally and the loop ends.
-      if (toolCall && requests.length === 1) {
+      // The first turn may ask for tool calls, so an approval dialog (one call)
+      // or a multi-file turn (several calls) can be exercised; after that the
+      // model answers normally and the loop ends.
+      if (calls.length && requests.length === 1) {
         res.write(
           `data: ${JSON.stringify({
             choices: [
               {
                 index: 0,
                 delta: {
-                  tool_calls: [
-                    {
-                      index: 0,
-                      id: 'call_1',
-                      type: 'function',
-                      function: { name: toolCall.name, arguments: JSON.stringify(toolCall.arguments) },
-                    },
-                  ],
+                  tool_calls: calls.map((call, index) => ({
+                    index,
+                    id: `call_${index + 1}`,
+                    type: 'function',
+                    function: { name: call.name, arguments: JSON.stringify(call.arguments) },
+                  })),
                 },
               },
             ],
@@ -115,7 +115,7 @@ async function startMockServer({ toolCall = null } = {}) {
   };
 }
 
-function fixture(prefix, baseUrl, { keys = null } = {}) {
+function fixture(prefix, baseUrl, { keys = null, permissions = null } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
   const configDir = path.join(root, 'config');
   const workspace = path.join(root, 'workspace');
@@ -132,7 +132,7 @@ function fixture(prefix, baseUrl, { keys = null } = {}) {
       // switches provider) never reaches the real internet during a test.
       providers: { nvidia: { baseUrl }, tokenharbor: { baseUrl }, custom: { baseUrl } },
       defaultModel: 'z-ai/glm-5.3-flash',
-      permissions: { shell: 'ask', fileWrite: 'ask', sensitiveRead: 'ask' },
+      permissions: permissions ?? { shell: 'ask', fileWrite: 'ask', sensitiveRead: 'ask' },
       ui: { mouse: false },
     }),
   );
@@ -195,7 +195,7 @@ function launch(fixtureDir, extraArgs = []) {
 }
 
 async function startPty(prefix, options = {}) {
-  const server = await startMockServer({ toolCall: options.toolCall ?? null });
+  const server = await startMockServer({ toolCall: options.toolCall ?? null, toolCalls: options.toolCalls ?? null });
   const fixtureDir = fixture(prefix, server.url, options);
   const tui = launch(fixtureDir, options.args ?? []);
   const ready = await waitFor(() => /MIKUHOST AGENT/.test(tui.output));
@@ -761,6 +761,46 @@ test('pty: /undo restores the file the agent just overwrote', { skip: !HAS_SCRIP
     );
     assert.match(tui.output, /Restored catatan\.txt to the version before write_file/);
     assert.match(tui.output, /Undo: restored catatan\.txt/);
+    assert.equal(tui.child.exitCode, null, 'the TUI must stay alive');
+  } finally {
+    await tui.stop();
+    await server.close();
+  }
+});
+
+test('pty: /undo turn reverts every file one turn wrote', { skip: !HAS_SCRIPT }, async () => {
+  const { tui, server } = await startPty('mikuhost-pty-undo-turn-', {
+    // Unattended writes keep this test on the undo path: approving two dialogs
+    // by hand would only exercise the approval dialog again.
+    permissions: { shell: 'ask', fileWrite: 'auto', sensitiveRead: 'ask' },
+    toolCalls: [
+      { name: 'create_file', arguments: { path: 'satu.txt', content: 'satu\n' } },
+      { name: 'create_file', arguments: { path: 'dua.txt', content: 'dua\n' } },
+    ],
+  });
+  const first = path.join(tui.fixtureDir.workspace, 'satu.txt');
+  const second = path.join(tui.fixtureDir.workspace, 'dua.txt');
+  try {
+    await sleep(400);
+    tui.write('buat dua file');
+    await sleep(300);
+    tui.write('\r');
+    assert.ok(
+      await waitFor(() => fs.existsSync(first) && fs.existsSync(second)),
+      `the turn did not write both files:\n${tui.output.slice(-2000)}`,
+    );
+    assert.ok(await waitFor(() => /Completed in/.test(tui.output)), 'the turn never finished');
+
+    tui.write('/undo turn');
+    await sleep(300);
+    tui.write('\r');
+    assert.ok(
+      await waitFor(() => !fs.existsSync(first) && !fs.existsSync(second)),
+      `the whole turn was not reverted:\n${tui.output.slice(-2000)}`,
+    );
+    assert.ok(/Undid the last turn/.test(tui.output), `the notice is missing:\n${tui.output.slice(-1200)}`);
+    assert.ok(/2 removed/.test(tui.output), 'the notice must count both files');
+    assert.ok(/reverted the last turn/.test(tui.output), 'the transcript must record the rollback');
     assert.equal(tui.child.exitCode, null, 'the TUI must stay alive');
   } finally {
     await tui.stop();

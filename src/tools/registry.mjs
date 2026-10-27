@@ -50,9 +50,13 @@ export class ToolRegistry {
     isRootUser = false,
     session = null,
     history = null,
+    turnId = null,
   } = {}) {
     this.workspace = workspace;
     this.history = history;
+    // Identifies the turn these tool calls belong to, so every snapshot it
+    // takes can be reverted together by /undo turn.
+    this.turnId = turnId;
     this.config = config;
     this.requestApproval = requestApproval;
     this.onActivity = onActivity;
@@ -160,6 +164,7 @@ export class ToolRegistry {
             tool,
             previous,
             next,
+            turnId: this.turnId,
           });
         } catch {
           return null;

@@ -158,7 +158,7 @@ Di dalam TUI:
 | `/workspace <path>` · `/project <nama>` | pindah workspace / fokus project |
 | `/permissions shell allow` | izinkan perintah aman tanpa bertanya |
 | `/settings` | semua pengaturan izin |
-| `/undo` · `/undo list` | batalkan perubahan file terakhir dari agen |
+| `/undo` · `/undo list` | batalkan perubahan file terakhir dari agen (`/undo turn` = semua file yang diubah turn terakhir sekaligus) |
 | `/continue` | lanjutkan turn yang terputus (SSH putus/crash) |
 | `/compact` · `/status` | lihat pemadatan konteks · status runtime |
 | `/help` | daftar lengkap |
@@ -201,7 +201,9 @@ sebelum menulis atau menjalankan perintah.
   menyimpan key, dan `credentials.json` akan dienkripsi. Tanpa passphrase yang
   sama, file itu tidak bisa dibuka — catat baik-baik.
 - **`/undo`** menyimpan salinan file sebelum diubah (40 langkah terakhir),
-  jadi perubahan agen bisa dibatalkan tanpa git.
+  jadi perubahan agen bisa dibatalkan tanpa git. **`/undo turn`** membatalkan
+  sekaligus semua file yang diubah di turn terakhir; file yang kamu ubah sendiri
+  setelahnya dilewati (bukan ditimpa) dan sisanya tetap dikembalikan.
 - **Yang dikirim ke provider** hanya isi percakapan, potongan file yang dibaca,
   dan hasil perintah yang relevan — bukan seluruh disk.
 

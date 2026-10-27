@@ -19,7 +19,11 @@ export const SLASH_COMMANDS = [
   { name: 'clear', usage: '/clear', description: 'Erase this session’s conversation' },
   { name: 'compact', usage: '/compact', description: 'Show how the context window is compacted' },
   { name: 'continue', usage: '/continue', description: 'Resume the last turn if it never got an answer' },
-  { name: 'undo', usage: '/undo [list|force]', description: 'Restore the file the agent changed last' },
+  {
+    name: 'undo',
+    usage: '/undo [list|turn|force]',
+    description: 'Restore the last change, or every file the last turn changed',
+  },
   { name: 'rename', usage: '/rename <title>', description: 'Rename the current session' },
   { name: 'mouse', usage: '/mouse <on|off>', description: 'Toggle mouse click support' },
   { name: 'exit', usage: '/exit', description: 'Quit MikuHost Agent' },

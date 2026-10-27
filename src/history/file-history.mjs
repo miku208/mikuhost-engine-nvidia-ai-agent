@@ -73,7 +73,16 @@ export class FileHistory {
    * Returns the entry, or null when the edit cannot be undone safely
    * (binary/unreadable/too large previous content).
    */
-  record({ sessionId = null, workspace = null, absolute, relPath = null, tool = 'write', previous = null, next = null } = {}) {
+  record({
+    sessionId = null,
+    workspace = null,
+    absolute,
+    relPath = null,
+    tool = 'write',
+    previous = null,
+    next = null,
+    turnId = null,
+  } = {}) {
     if (!absolute) return null;
     const existed = typeof previous === 'string';
     const content = existed ? previous : '';
@@ -87,6 +96,9 @@ export class FileHistory {
       absolute: path.resolve(absolute),
       relPath,
       tool,
+      // Every snapshot taken during one turn carries the same id, so /undo turn
+      // can revert a whole turn instead of one file at a time.
+      turnId: turnId ?? null,
       createdAt: Date.now(),
       existed,
       bytes: existed ? Buffer.byteLength(content, 'utf8') : 0,
@@ -130,7 +142,76 @@ export class FileHistory {
     const index = this.#latestIndex(sessionId);
     if (index === -1) return { ok: false, reason: 'empty' };
     const entry = this.entries[index];
+    const result = this.#restoreEntry(entry, { force });
+    if (!result.ok) return result;
+    this.#forget(entry);
+    this.#persist();
+    return result;
+  }
 
+  /**
+   * Turn id of the newest snapshot in the session, or null when there is none
+   * (and null for snapshots recorded without one, such as an index written by
+   * an older version).
+   */
+  latestTurn({ sessionId = null } = {}) {
+    const index = this.#latestIndex(sessionId);
+    return index === -1 ? null : this.entries[index].turnId ?? null;
+  }
+
+  /**
+   * Restore every file the newest turn changed, newest snapshot first so that
+   * repeated edits to one file unwind in the right order.
+   *
+   * A file the user edited afterwards is skipped rather than overwritten (pass
+   * `force` to restore it anyway): one blocked file must not strand the others,
+   * so the rest of the turn is still reverted and the skips are reported.
+   */
+  undoTurn({ sessionId = null, force = false } = {}) {
+    const turnId = this.latestTurn({ sessionId });
+    const targets = (
+      turnId === null
+        ? [this.entries[this.#latestIndex(sessionId)]]
+        : this.entries.filter(
+            (entry) => entry.turnId === turnId && (sessionId === null || entry.sessionId === sessionId),
+          )
+    )
+      .filter(Boolean)
+      .reverse();
+
+    if (!targets.length) return { ok: false, reason: 'empty' };
+
+    const restored = [];
+    const removed = [];
+    const skipped = [];
+    for (const entry of targets) {
+      const result = this.#restoreEntry(entry, { force });
+      if (!result.ok) {
+        skipped.push({ entry, reason: result.reason });
+        continue;
+      }
+      this.#forget(entry);
+      if (result.removed) removed.push(entry);
+      else restored.push(entry);
+    }
+    if (restored.length || removed.length) this.#persist();
+
+    const reverted = restored.length + removed.length;
+    return {
+      ok: reverted > 0,
+      turnId,
+      restored,
+      removed,
+      skipped,
+      // A one-file turn also reports through `entry`, so callers written for the
+      // single-file undo keep working.
+      entry: restored[0] ?? removed[0] ?? skipped[0]?.entry ?? null,
+      reason: reverted ? null : skipped[0]?.reason ?? 'empty',
+    };
+  }
+
+  /** Put one entry's file back. Never touches the entry list. */
+  #restoreEntry(entry, { force = false } = {}) {
     // Defensive: never write outside the workspace recorded with the entry.
     if (entry.workspace && !isInside(entry.workspace, entry.absolute)) {
       return { ok: false, reason: 'outside-workspace', entry };
@@ -163,13 +244,17 @@ export class FileHistory {
       fs.rmSync(entry.absolute);
     }
 
-    this.entries.splice(index, 1);
+    return { ok: true, entry, removed: !entry.existed };
+  }
+
+  /** Drop an undone entry and its snapshot file. */
+  #forget(entry) {
+    const index = this.entries.indexOf(entry);
+    if (index !== -1) this.entries.splice(index, 1);
     try {
       fs.unlinkSync(this.#snapshotFile(entry.id));
     } catch {
       /* ignore */
     }
-    this.#persist();
-    return { ok: true, entry, removed: !entry.existed };
   }
 }

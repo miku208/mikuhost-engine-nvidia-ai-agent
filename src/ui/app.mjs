@@ -1095,8 +1095,9 @@ function App({
           break;
         }
         const current = envRef.current;
-        const mode = String(args).trim().toLowerCase();
-        if (mode === 'list') {
+        const words = String(args).trim().toLowerCase().split(/\s+/).filter(Boolean);
+        const force = words.includes('force');
+        if (words[0] === 'list') {
           const entries = current.runtime.history.list({ sessionId: current.session.id, limit: 10 });
           if (!entries.length) {
             setNotice({ text: 'Nothing to undo in this session.', tone: 'info' });
@@ -1110,15 +1111,56 @@ function App({
                 return `  ${index + 1}. ${entry.existed ? 'restore' : 'remove '} ${entry.relPath ?? entry.absolute}  · ${entry.tool} · ${time}`;
               }),
               '',
-              '/undo restores the newest one · /undo force ignores later manual changes',
+              '/undo restores the newest one · /undo turn reverts the whole last turn · /undo force ignores later manual changes',
             ].join('\n'),
             tone: 'info',
           });
           break;
         }
+        if (words.includes('turn')) {
+          const turnResult = current.runtime.history.undoTurn({ sessionId: current.session.id, force });
+          if (!turnResult.ok) {
+            setNotice({
+              text:
+                turnResult.reason === 'empty'
+                  ? 'Nothing to undo in this session. Only files the agent changed here are tracked.'
+                  : `Could not undo the last turn (${turnResult.reason}).`,
+              tone: turnResult.reason === 'empty' ? 'info' : 'error',
+            });
+            break;
+          }
+          const reverted = [...turnResult.restored, ...turnResult.removed];
+          // Same reasoning as the single-file undo: the model needs to know the
+          // work was rolled back, not only the user reading the notice.
+          current.session.appendMessage({
+            role: 'system',
+            content: [
+              `Undo: reverted the last turn — ${reverted.length} file${reverted.length === 1 ? '' : 's'} put back the way they were before it.`,
+              ...turnResult.restored.map((entry) => `  restored ${entry.relPath ?? entry.absolute}`),
+              ...turnResult.removed.map((entry) => `  removed ${entry.relPath ?? entry.absolute} (created by ${entry.tool})`),
+              ...turnResult.skipped.map(
+                (item) => `  skipped ${item.entry.relPath ?? item.entry.absolute} (${item.reason} — it changed after the agent's edit)`,
+              ),
+            ].join('\n'),
+            meta: { undo: true },
+          });
+          syncFromSession();
+          setNotice({
+            text: [
+              `Undid the last turn: ${turnResult.restored.length} restored${turnResult.removed.length ? `, ${turnResult.removed.length} removed` : ''}.`,
+              ...turnResult.restored.map((entry) => `  restore ${entry.relPath ?? entry.absolute}`),
+              ...turnResult.removed.map((entry) => `  remove  ${entry.relPath ?? entry.absolute}`),
+              ...turnResult.skipped.map(
+                (item) => `  skipped ${item.entry.relPath ?? item.entry.absolute} — changed since the agent's edit · /undo turn force reverts it too`,
+              ),
+            ].join('\n'),
+            tone: turnResult.skipped.length ? 'warning' : 'info',
+          });
+          break;
+        }
         const result = current.runtime.history.undo({
           sessionId: current.session.id,
-          force: mode === 'force',
+          force,
         });
         if (!result.ok) {
           const entry = result.entry;

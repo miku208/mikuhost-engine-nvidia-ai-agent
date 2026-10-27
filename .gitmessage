@@ -1,0 +1,7 @@
+# Subject line: imperative, one line, specific. No bare "Update"/"Fix".
+
+# Body: why the change is needed, not a restatement of the diff.
+# Leave the trailer below in place: it credits the agent that wrote the code.
+#
+
+Co-Authored-By: miku208 <suronos907@gmail.com>

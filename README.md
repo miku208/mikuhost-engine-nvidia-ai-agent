@@ -81,8 +81,12 @@ GLM 5.3 Flash · /root/ourin · NVIDIA · ASK
 - Shell and file permission policies with diff previews and approval dialogs.
 - `/undo` safety net: `write_file`, `edit_file` and `create_file` snapshot the
   previous version first (0600, bounded to the last 40 edits). `/undo` restores
-  the newest one and `/undo list` shows the stack. A file you changed yourself
-  after the agent is never overwritten unless you ask for `/undo force`.
+  the newest one and `/undo list` shows the stack. Because every snapshot of a
+  turn carries that turn's id, `/undo turn` reverts every file the last turn
+  changed in one step, newest snapshot first so repeated edits unwind in order.
+  A file you changed yourself after the agent is never overwritten unless you
+  ask for `/undo force` (or `/undo turn force`); a file blocked that way is
+  reported and the rest of the turn is still reverted.
 - Interrupted turns are recoverable: a turn that never produced an answer (SSH
   disconnect, closed Termux window, crash) is flagged when the session is
   reopened, and `/continue` re-runs it without duplicating your message in the
@@ -335,7 +339,7 @@ to NVIDIA.
 | `/clear` | Erase the current session's conversation |
 | `/compact` | Show how the context window is compacted |
 | `/continue` | Resume the last turn when it never got an answer |
-| `/undo [list\|force]` | Restore the file the agent changed last (`list` shows the stack) |
+| `/undo [list\|turn\|force]` | Restore the file the agent changed last, or a whole turn with `/undo turn` (`list` shows the stack) |
 | `/rename <title>` | Rename session |
 | `/mouse on\|off` | Mouse click support |
 | `/exit` | Quit |
@@ -774,9 +778,9 @@ characters in random reads, an over-limit 80,000-character paste, a split
 bracketed 10,206-character paste, a 30,000-character bracketed paste with long
 gaps, two consecutive bracketed pastes (one containing ANSI escapes), a paste
 and Enter arriving in one read, the `/paste` capture flow (including a bracketed
-block inside capture), `/undo` restoring a file the agent overwrote, and a
-session reopened with an unanswered prompt where `/continue` finishes the turn
-without duplicating it; they assert the composer and prompt are untouched and the
+block inside capture), `/undo` restoring a file the agent overwrote, `/undo turn`
+reverting every file one turn wrote, and a session reopened with an unanswered
+prompt where `/continue` finishes the turn without duplicating it; they assert the composer and prompt are untouched and the
 TUI stays alive. They are skipped only when `script` is missing.
 
 Provider tests run against a local mock of the OpenAI-compatible API; a live key
