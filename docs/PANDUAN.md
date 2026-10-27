@@ -4,6 +4,8 @@ Panduan ini untuk dibagikan. Isinya: cara install, cara mengambil API key dari
 **Token Harbor** dan **NVIDIA**, cara menjalankan, dan hal-hal yang perlu
 diketahui sebelum memberi agen ini akses ke servermu.
 
+Versi bahasa Inggris (ringkas): **[SHARE-Guide.md](SHARE-Guide.md)**.
+
 Repo: <https://github.com/miku208/mikuhost-engine-nvidia-ai-agent>
 
 ---
@@ -225,11 +227,14 @@ log: `~/.config/mikuhost/logs/`.
 
 ## 9. Catatan lisensi & kredit
 
-- Setiap file sumber membawa notice hak cipta, dan nama produk diambil dari
-  payload terenkripsi (`src/branding/credit.enc`). Build tanpa file itu menolak
-  berjalan — memang disengaja.
-- Tools ini **tidak untuk dijual ulang**. Baca `LICENSE` di repo sebelum
-  mendistribusikan ulang.
+- Nama produk dan kredit diambil dari payload terenkripsi
+  (`src/branding/credit.enc`). Build tanpa file itu menolak berjalan — memang
+  disengaja.
+- Lisensi repo adalah **MIT**: kamu boleh memakai, mengubah, dan
+  mendistribusikan ulang sumbernya sesuai ketentuan MIT. Namun penulis meminta
+  tools ini **tidak dijual ulang** — setiap file sumber membawa notice
+  "All rights reserved · not for resale" yang harus tetap ada. Untuk
+  redistribusi komersial, baca `LICENSE` dulu.
 - Engine ini dibangun oleh **miku208**:
   <https://github.com/miku208/mikuhost-engine-nvidia-ai-agent>
 

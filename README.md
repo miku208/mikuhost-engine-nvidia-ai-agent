@@ -12,9 +12,12 @@ Token Harbor, or your own gateway.
 One paste is one attachment. The full source is kept for the model, while the
 composer only shows a single-line chip — no code preview, no second card panel.
 
-Bahasa Indonesia: see **[docs/PANDUAN.md](docs/PANDUAN.md)** for a share-ready
-guide covering install, getting API keys from Token Harbor and NVIDIA, slash
-commands, and the security model.
+Bahasa Indonesia: see **[docs/PANDUAN.md](docs/PANDUAN.md)** for the full
+share-ready guide covering install, getting API keys from Token Harbor and
+NVIDIA, slash commands, troubleshooting, and the security model.
+
+English: see **[docs/SHARE-Guide.md](docs/SHARE-Guide.md)** for a short
+share-ready summary of the same material.
 
 ```
 ╭──────────────────────────────────────────────────────────────╮
